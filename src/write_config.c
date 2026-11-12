@@ -3,11 +3,15 @@
  *  directly to the RP2350 BOOTSEL mount point.
  *
  * CONFIG LAYOUT IN FLASH (last 4KB sector, offset 0x3FF000):
- *   [0..3]  magic  = 0xCAFEF00D  (little-endian u32)
- *   [4..7]  hours  = N           (little-endian u32)
+ *   [0..3]   magic    = 0xCAFEF00E  (little-endian u32)
+ *   [4..7]   hours    = N           (little-endian u32)
+ *   [8..11]  period_s = N           (little-endian u32, re-activation gap)
  *
  * CREDENTIALS LAYOUT IN FLASH (sector before it, offset 0x3FE000):
  *   wifi_creds_t in flash_config.h, sealed with a CRC-32.
+ *
+ * LOGIN LAYOUT IN FLASH (sector before that, offset 0x3FD000):
+ *   login_creds_t in flash_config.h, sealed with a CRC-32.
  */
 
 #include <stdio.h>
@@ -18,6 +22,7 @@
 #include <termios.h>
 #include <unistd.h>
 #include "flash_config.h"
+#include "hid_keymap.h"
 
 /* ── UF2 constants ───────────────────────── */
 #define UF2_MAGIC_START0   0x0A324655UL
@@ -43,6 +48,7 @@ typedef struct __attribute__((packed)) {
 
 _Static_assert(sizeof(uf2_block_t) == 512, "UF2 blocks must be exactly 512 bytes");
 _Static_assert(sizeof(wifi_creds_t) <= UF2_PAYLOAD_SIZE, "credentials must fit one UF2 block");
+_Static_assert(sizeof(login_creds_t) <= UF2_PAYLOAD_SIZE, "login must fit one UF2 block");
 
 static void write_le32(void *dest, uint32_t v)
 {
@@ -98,7 +104,7 @@ static int write_uf2(uint32_t addr, const void *payload, size_t len)
 }
 
 /* Standard input keeps the password out of the shell history and process list. */
-static int read_password(char *buf, size_t size)
+static int read_password(char *buf, size_t size, const char *prompt)
 {
     struct termios normal;
     struct termios hidden;
@@ -106,7 +112,7 @@ static int read_password(char *buf, size_t size)
 
     if (is_terminal)
     {
-        fputs("Wi-Fi password: ", stderr);
+        fputs(prompt, stderr);
         hidden = normal;
         hidden.c_lflag &= ~(tcflag_t)ECHO;
         tcsetattr(STDIN_FILENO, TCSAFLUSH, &hidden);
@@ -126,22 +132,66 @@ static int read_password(char *buf, size_t size)
     return 0;
 }
 
-static int write_hours(const char *arg)
+/* Accepts seconds, or an integer with a single unit suffix s m h d w. */
+static int parse_period_s(const char *arg, uint32_t *out)
 {
     char *end = NULL;
-    long hours = strtol(arg, &end, 10);
+    long long value = strtoll(arg, &end, 10);
+
+    /* Reject out-of-range before the multiply, so it cannot overflow. */
+    if (end == arg || value <= 0 || value > (long long)CONFIG_PERIOD_MAX_S)
+        return -1;
+
+    unsigned long long mult = 1;
+    if (*end != '\0')
+    {
+        if (end[1] != '\0')
+            return -1;
+        switch (*end)
+        {
+            case 's': mult = 1;      break;
+            case 'm': mult = 60;     break;
+            case 'h': mult = 3600;   break;
+            case 'd': mult = 86400;  break;
+            case 'w': mult = 604800; break;
+            default:  return -1;
+        }
+    }
+
+    unsigned long long secs = (unsigned long long)value * mult;
+    if (secs < CONFIG_PERIOD_MIN_S || secs > CONFIG_PERIOD_MAX_S)
+        return -1;
+
+    *out = (uint32_t)secs;
+    return 0;
+}
+
+/* The config sector holds both fields, so every write sets the run window and
+ * the re-activation period together. period_arg may be NULL, which keeps the
+ * one-week default. */
+static int write_run_config(const char *hours_arg, const char *period_arg)
+{
+    char *end = NULL;
+    long hours = strtol(hours_arg, &end, 10);
 
     if (*end != '\0' || hours < (long)CONFIG_HOURS_MIN || hours > (long)CONFIG_HOURS_MAX)
         return (fprintf(stderr, "Error: hours must be %ld-%ld (got %ld)\n",
                         (long)CONFIG_HOURS_MIN, (long)CONFIG_HOURS_MAX, hours), 1);
 
-    uint8_t cfg[8];
-    write_le32(cfg, CONFIG_MAGIC);
+    uint32_t period_s = CONFIG_DEFAULT_PERIOD_S;
+    if (period_arg != NULL && parse_period_s(period_arg, &period_s) != 0)
+        return (fprintf(stderr, "Error: period must be 1-%lu s, optional suffix s/m/h/d/w (got %s)\n",
+                        (unsigned long)CONFIG_PERIOD_MAX_S, period_arg), 1);
+
+    uint8_t cfg[12];
+    write_le32(cfg,     CONFIG_MAGIC);
     write_le32(cfg + 4, (uint32_t)hours);
+    write_le32(cfg + 8, period_s);
 
     if (write_uf2(CONFIG_FLASH_ADDR, cfg, sizeof(cfg)) != 0)
         return 1;
-    printf("Configured runtime: %ld hours\n", hours);
+    printf("Configured run window %ld h, re-activation period %lu s\n",
+           hours, (unsigned long)period_s);
     return 0;
 }
 
@@ -162,7 +212,7 @@ static int write_credentials(const char *auth_name, const char *ssid)
 
     /* Two spare bytes: a longer line then reads as too long, not as a cut-off password. */
     char key[CREDS_KEY_MAX + 3];
-    if (read_password(key, sizeof(key)) != 0)
+    if (read_password(key, sizeof(key), "Wi-Fi password: ") != 0)
         return (fprintf(stderr, "Error: no password on standard input\n"), 1);
 
     size_t key_len = strlen(key);
@@ -197,17 +247,80 @@ static int clear_credentials(void)
     return 0;
 }
 
+/* Rejects a field with any character the DE layout cannot type, so the device
+ * is never asked to type something it has no key for. */
+static int check_typeable(const char *what, const char *s)
+{
+    for (size_t i = 0; s[i] != '\0'; i++)
+    {
+        uint8_t usage;
+        uint8_t mod;
+        if (!hid_key_for(s[i], &usage, &mod))
+            return (fprintf(stderr, "Error: %s has a character that cannot be typed on the DE layout: '%c' (0x%02x)\n",
+                            what, (unsigned char)s[i], (unsigned char)s[i]), 1);
+    }
+    return 0;
+}
+
+static int write_login(const char *user)
+{
+    size_t ulen = strlen(user);
+    if (ulen == 0 || ulen > LOGIN_USER_MAX)
+        return (fprintf(stderr, "Error: username must be 1-%d bytes\n", LOGIN_USER_MAX), 1);
+    if (check_typeable("username", user) != 0)
+        return 1;
+
+    char pass[LOGIN_PASS_MAX + 3];
+    if (read_password(pass, sizeof(pass), "Login password: ") != 0)
+        return (fprintf(stderr, "Error: no password on standard input\n"), 1);
+
+    size_t plen = strlen(pass);
+    if (plen > LOGIN_PASS_MAX)
+        return (fprintf(stderr, "Error: password must be at most %d bytes\n", LOGIN_PASS_MAX), 1);
+    if (check_typeable("password", pass) != 0)
+        return 1;
+
+    login_creds_t lc;
+    memset(&lc, 0, sizeof(lc));
+    write_le32(&lc.magic, LOGIN_MAGIC);
+    write_le32(&lc.version, LOGIN_VERSION);
+    memcpy(lc.user, user, ulen);
+    memcpy(lc.pass, pass, plen);
+    write_le32(&lc.crc, creds_crc32(&lc, offsetof(login_creds_t, crc)));
+
+    if (write_uf2(LOGIN_CREDS_FLASH_ADDR, &lc, sizeof(lc)) != 0)
+        return 1;
+    printf("Stored login for %s\n", user);
+    return 0;
+}
+
+static int clear_login(void)
+{
+    const uint8_t blank[sizeof(login_creds_t)] = {0};
+
+    if (write_uf2(LOGIN_CREDS_FLASH_ADDR, blank, sizeof(blank)) != 0)
+        return 1;
+    printf("Login cleared\n");
+    return 0;
+}
+
 int main(int ac, char **av)
 {
     if (ac == 2 && strcmp(av[1], "--wifi-clear") == 0)
         return clear_credentials();
-    if (ac == 2 && av[1][0] != '-')
-        return write_hours(av[1]);
+    if (ac == 2 && strcmp(av[1], "--login-clear") == 0)
+        return clear_login();
     if (ac == 4 && strcmp(av[1], "--wifi") == 0)
         return write_credentials(av[2], av[3]);
+    if (ac == 3 && strcmp(av[1], "--login") == 0)
+        return write_login(av[2]);
+    if ((ac == 2 || ac == 3) && av[1][0] != '-')
+        return write_run_config(av[1], ac == 3 ? av[2] : NULL);
 
-    fprintf(stderr, "Usage: %s <hours>\n", av[0]);
+    fprintf(stderr, "Usage: %s <hours> [period]    period e.g. 3600, 30m, 1h, 1d, 7d; default 7d\n", av[0]);
     fprintf(stderr, "       %s --wifi <wpa2|wpa3> <ssid>   (password from standard input)\n", av[0]);
     fprintf(stderr, "       %s --wifi-clear\n", av[0]);
+    fprintf(stderr, "       %s --login <username>          (password from standard input)\n", av[0]);
+    fprintf(stderr, "       %s --login-clear\n", av[0]);
     return 1;
 }
