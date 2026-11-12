@@ -38,6 +38,9 @@ It generates time-driven, non-deterministic keyboard and mouse activity for rese
 - `src/reactivation.c`
   Re-activation timer: the active then idle duty cycle that repeats for ever.
 
+- `src/login.c`
+  Login typist: at each re-activation types the username, Return, the password, Return, then waits before the HID activity starts.
+
 - `src/wifi_manager.c` (Pico 2 W only)
   Non-blocking station state machine: connect, monitor link, reconnect with backoff.
 
@@ -52,10 +55,13 @@ It generates time-driven, non-deterministic keyboard and mouse activity for rese
 - `inc/flash_config.h`
   Flash layout definitions and configuration read/validation logic.
 
+- `inc/hid_keymap.h`
+  ASCII to HID key-code map for the German QWERTZ layout, shared by the firmware and `write_config`.
+
 ### Host utility
 
 - `src/write_config.c`
-  Host-side tool that generates a UF2 payload to write the run time or Wi-Fi credentials into a reserved flash sector.
+  Host-side tool that generates a UF2 payload to write the run time, Wi-Fi credentials or login credentials into a reserved flash sector.
 
 ---
 
@@ -134,19 +140,20 @@ The device is implemented as a **composite HID interface with report IDs**:
 
 Pico 2 and Pico 2 W flash map (4 MB):
 
-- Firmware region: `0x10000000 .. 0x103FDFFF` (`0x003FE000` bytes)
-- Reserved credentials sector: `0x103FE000 .. 0x103FEFFF`
+- Firmware region: `0x10000000 .. 0x103FCFFF` (`0x003FD000` bytes)
+- Reserved login credentials sector: `0x103FD000 .. 0x103FDFFF`
+- Reserved Wi-Fi credentials sector: `0x103FE000 .. 0x103FEFFF`
 - Reserved config sector: `0x103FF000 .. 0x103FFFFF` (last 4 KB sector)
 
 ### Safety invariant
 
-The firmware image must end before the reserved sectors. If it overlapped them, the firmware would read its own bytes as settings and fall back to `CONFIG_DEFAULT_HOURS` and no Wi-Fi. Writing settings would overwrite part of the firmware.
+The firmware image must end before the reserved sectors. If it overlapped them, the firmware would read its own bytes as settings and fall back to `CONFIG_DEFAULT_HOURS`, no Wi-Fi and no login. Writing settings would overwrite part of the firmware.
 
 Enforced at build time:
 
-- the `PICO_FLASH_SIZE_BYTES` CMake variable limits the linker's `FLASH` region to `0x003FE000` bytes, so an oversized image fails to link
-- `static_assert`s in `src/main.c` fail the build unless the linker region ends exactly at `CREDS_FLASH_ADDR` and `flash_config.h` matches the board's flash size and sector size
-- `_Static_assert`s in `inc/flash_config.h` fail both the firmware and host builds if `pico_config_t` or `wifi_creds_t` changes size
+- the `PICO_FLASH_SIZE_BYTES` CMake variable limits the linker's `FLASH` region to `0x003FD000` bytes, so an oversized image fails to link
+- `static_assert`s in `src/main.c` fail the build unless the linker region ends exactly at `LOGIN_CREDS_FLASH_ADDR`, the lowest reserved sector, and `flash_config.h` matches the board's flash size and sector size
+- `_Static_assert`s in `inc/flash_config.h` fail both the firmware and host builds if `pico_config_t`, `wifi_creds_t` or `login_creds_t` changes size
 - `PICO_BOARD` defaults to `pico2_w` and CMake configuration fails for any non-RP2350 platform
 
 The checks exist because the layout is defined in two places, `CMakeLists.txt` and `inc/flash_config.h`. Without them, either side could change and the build would still succeed.
@@ -235,6 +242,8 @@ gcc src/write_config.c -Iinc -o write_config
 ./write_config <hours> [period]
 ./write_config --wifi <wpa2|wpa3> <ssid>
 ./write_config --wifi-clear
+./write_config --login <username>
+./write_config --login-clear
 ```
 
 ### Output
@@ -244,6 +253,20 @@ Generates a UF2 payload that writes one record into its reserved flash sector. T
 ### Credential record
 
 `wifi_creds_t` in `inc/flash_config.h` holds a magic value, version, security mode, SSID, password and CRC-32. The firmware makes no connection attempt unless every field is valid. The CRC detects corruption only, it does not protect the password.
+
+`login_creds_t` holds the same way a magic value, version, username, password and CRC-32. `--login` reads the password from standard input and rejects any character the German layout cannot type, so an unstoreable password fails here rather than mistyping at the keyboard.
+
+---
+
+## Login
+
+At each re-activation the device types the stored username, Return, the password, Return, then waits 15 seconds before the simulated activity starts, so the host has time to accept the login.
+
+- credentials live in their own flash sector, written once per board with `--login`, so a run-time or Wi-Fi change never erases them. Without a valid record the device types nothing and goes straight to activity
+- the typist is non-blocking: it sends one key report per loop pass and advances only when the report is accepted, so it never stalls USB
+- every key down is followed by its release, so the host sees each character once and nothing auto-repeats
+- the host layout is German QWERTZ. The device sends positional key codes, so `z` is sent as the physical key US keyboards label `Y`, and symbols such as `@` and `{ [ ] }` use AltGr. Characters the layout reaches only through a dead key (`^`, the accents) and non-ASCII characters (umlauts, `ß`, `€`) cannot be typed and are rejected when the credential is stored
+- the password is held in plaintext in flash and briefly in RAM while typing. An OTP-backed encrypted store is the planned next step
 
 ---
 
@@ -296,8 +319,9 @@ Device behaviour is observed host-side on Linux.
 |---|---|---|
 | Low | `src/usb_descriptors.c` | Product ID `0x0003` belongs to the RP2040 USB boot mode. |
 | Risk | `src/wifi_manager.c` | Worst-case main loop time with Wi-Fi has not been measured against the 5 ms HID interval. |
-| Risk | `inc/flash_config.h` | The Wi-Fi password is stored in plaintext in the credentials sector, so physical access to the board reveals it. |
+| Risk | `inc/flash_config.h` | The Wi-Fi and login passwords are stored in plaintext in their flash sectors, so physical access to the board reveals them. An OTP-backed encrypted store is planned. |
 | Low | `src/input_tasks.c` | After a long idle, each behaviour whose timer has already elapsed fires once on the first active pass, a brief catch-up at the start of a window. |
+| Risk | `inc/hid_keymap.h` | The DE QWERTZ map is from the layout spec and is not yet verified against a real German host. Store a known credential and check the typed characters before relying on it. |
 
 ---
 

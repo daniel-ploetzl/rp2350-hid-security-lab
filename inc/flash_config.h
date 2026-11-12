@@ -1,6 +1,7 @@
 #ifndef FLASH_CONFIG_H
 #define FLASH_CONFIG_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -30,6 +31,15 @@
 #define CREDS_KEY_MIN            8
 #define CREDS_KEY_MAX            64
 
+/* A third sector below the Wi-Fi one, holding the login username and password
+ * the device types at re-activation. Separate so a run-time or Wi-Fi change
+ * cannot erase it. */
+#define LOGIN_CREDS_FLASH_ADDR   (CREDS_FLASH_ADDR - CONFIG_SECTOR_SIZE_BYTES)
+#define LOGIN_MAGIC              0x4C4F4749UL   /* "LOGI" */
+#define LOGIN_VERSION            1UL
+#define LOGIN_USER_MAX           64
+#define LOGIN_PASS_MAX           64
+
 typedef struct {
     uint32_t magic;
     uint32_t hours;
@@ -47,8 +57,20 @@ typedef struct {
     uint32_t crc;
 } wifi_creds_t;
 
+/* The typed login. Same record discipline as the Wi-Fi one: magic, version,
+ * NUL-terminated strings and a CRC. reserved aligns crc to 4 bytes. */
+typedef struct {
+    uint32_t magic;
+    uint32_t version;
+    char     user[LOGIN_USER_MAX + 1];
+    char     pass[LOGIN_PASS_MAX + 1];
+    uint8_t  reserved[2];
+    uint32_t crc;
+} login_creds_t;
+
 _Static_assert(sizeof(pico_config_t) == 12, "config layout changed, update write_config.c");
 _Static_assert(sizeof(wifi_creds_t) == 116, "credentials layout changed, raise CREDS_VERSION");
+_Static_assert(sizeof(login_creds_t) == 144, "login layout changed, raise LOGIN_VERSION");
 
 static inline uint32_t config_read_hours(void)
 {
@@ -106,6 +128,28 @@ static inline const wifi_creds_t *creds_read(void)
         creds->key[CREDS_KEY_MAX] != '\0')
         return NULL;
     return creds;
+}
+
+/* Validation split out so it can run on the host against a crafted record.
+ * The username must be present, the password may be empty. */
+static inline bool login_valid(const login_creds_t *lc)
+{
+    if (lc->magic != LOGIN_MAGIC || lc->version != LOGIN_VERSION)
+        return false;
+    if (lc->crc != creds_crc32(lc, offsetof(login_creds_t, crc)))
+        return false;
+    if (lc->user[0] == '\0' ||
+        lc->user[LOGIN_USER_MAX] != '\0' ||
+        lc->pass[LOGIN_PASS_MAX] != '\0')
+        return false;
+    return true;
+}
+
+/* Returns NULL unless the whole record is valid, so the device never types garbage. */
+static inline const login_creds_t *login_read(void)
+{
+    const login_creds_t *lc = (const login_creds_t *) LOGIN_CREDS_FLASH_ADDR;
+    return login_valid(lc) ? lc : NULL;
 }
 
 #endif
