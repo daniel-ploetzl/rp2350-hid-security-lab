@@ -2,9 +2,10 @@
  * Login typist
  *
  *   At each re-activation the device types the stored username, Return, the
- *   password, Return, then waits so the host can finish logging in before the
- *   simulated activity starts. It is a non-blocking state machine driven from
- *   the main loop, one key event per pass, so it never stalls tud_task().
+ *   password, Return, waits for the host to finish logging in, then types
+ *   "blackscreen 12.56", Return before the simulated activity starts. It is a
+ *   non-blocking state machine driven from the main loop, one key event per
+ *   pass, so it never stalls tud_task().
  *
  *   Every key down is followed by its release, so nothing is held and the host
  *   sees each character exactly once with no auto-repeat.

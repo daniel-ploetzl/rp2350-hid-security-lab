@@ -39,7 +39,7 @@ It generates time-driven, non-deterministic keyboard and mouse activity for rese
   Re-activation timer: the active then idle duty cycle that repeats for ever.
 
 - `src/login.c`
-  Login typist: at each re-activation types the username, Return, the password, Return, then waits before the HID activity starts.
+  Login typist: starts at boot and each later re-activation, typing the username, Return, password, Return, waiting 15 seconds, then typing `<command>`, Return before HID activity starts.
 
 - `src/wifi_manager.c` (Pico 2 W only)
   Non-blocking station state machine: connect, monitor link, reconnect with backoff.
@@ -83,7 +83,7 @@ Activity repeats on a fixed cycle rather than running once. The device is active
 - the active window length is the stored `hours` value
 - the idle period is read from the flash config in seconds, from 1 second to 1 week, and defaults to 1 week
 - the first window opens at boot
-- each window begins with a one-shot edge, reserved for a login sequence that is not yet implemented
+- each window begins with a one-shot edge that runs the login and post-login command sequence before activity starts
 - the timer keeps each phase well under the 49.7-day clock wrap, so the rollover does not disturb the cadence
 
 ### Constraint model
@@ -260,11 +260,14 @@ Generates a UF2 payload that writes one record into its reserved flash sector. T
 
 ## Login
 
-At each re-activation the device types the stored username, Return, the password, Return, then waits 15 seconds before the simulated activity starts, so the host has time to accept the login.
+Before typing credentials, the device waits for the HID endpoint to remain ready for 2 seconds. This gives the host input layer time to initialise. USB servicing continues during this wait. The separate 15 second wait still follows the password and Return.
+
+At boot, then at each later re-activation, the device types the stored username, Return, the password, Return, waits 15 seconds for the host to accept the login, then types `blackscreen 12.56`, Return before the simulated activity starts.
 
 - credentials live in their own flash sector, written once per board with `--login`, so a run-time or Wi-Fi change never erases them. Without a valid record the device types nothing and goes straight to activity
 - the typist is non-blocking: it sends one key report per loop pass and advances only when the report is accepted, so it never stalls USB
 - every key down is followed by its release, so the host sees each character once and nothing auto-repeats
+- `blackscreen 12.56` is a firmware-defined post-login command, typed only after the 15-second host-login wait and followed by Return
 - the host layout is German QWERTZ. The device sends positional key codes, so `z` is sent as the physical key US keyboards label `Y`, and symbols such as `@` and `{ [ ] }` use AltGr. Characters the layout reaches only through a dead key (`^`, the accents) and non-ASCII characters (umlauts, `ß`, `€`) cannot be typed and are rejected when the credential is stored
 - the password is held in plaintext in flash and briefly in RAM while typing. An OTP-backed encrypted store is the planned next step
 
@@ -281,20 +284,18 @@ At each re-activation the device types the stored username, Return, the password
 ### Build
 
 ```bash
-mkdir build && cd build
-cmake ..
-make -j$(nproc)
+cmake -S . -B build
+cmake --build build -j"$(nproc)"
 ```
 
 Use one build directory per board. For a Pico 2 without Wi-Fi:
 
 ```bash
-mkdir build-pico2 && cd build-pico2
-cmake .. -DPICO_BOARD=pico2
-make -j$(nproc)
+cmake -S . -B build-pico2 -DPICO_BOARD=pico2
+cmake --build build-pico2 -j"$(nproc)"
 ```
 
-`PICO_BOARD` defaults to `pico2_w`. An existing build directory keeps the board it was configured with, so a build directory created for another board fails until it is removed.
+`PICO_BOARD` defaults to `pico2_w`. `cmake --build` works regardless of whether CMake selected Ninja or Unix Makefiles. An existing build directory keeps the board it was configured with, so a build directory created for another board fails until it is removed.
 
 ### Outputs
 

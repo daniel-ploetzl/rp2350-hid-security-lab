@@ -83,6 +83,7 @@ int main(void)
     reactivation_init(&react, active_ms, period_ms, now_ms());
 
     input_tasks_init();
+    login_begin(); /* Always type the initial login sequence after USB starts. */
 	led_update(true);
 
     while (1)
