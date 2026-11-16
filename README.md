@@ -342,6 +342,8 @@ The build emits `build/hid_lab.otp.json` with secure-boot settings, debug disabl
 
 An unprovisioned board cannot boot this secure image. It needs the matching OTP keys for secure boot and record decryption. Verification builds made with disposable keys are not deployable. Do not provision their OTP files.
 
+GitHub CI creates disposable signing, AES and IV keys in the runner temporary directory to compile both board variants. It does not provision OTP or upload the OTP provisioning file. The uploaded CI UF2 artifacts are for build verification only and cannot boot on a board. Never provision a board with CI keys.
+
 ### Development USB Pairing Test
 
 The development profile uses the SDK RP2350 Secure platform but skips image signing and encryption. On a blank board with secure boot unset, the ROM accepts the ordinary UF2 image without OTP provisioning. The profile does not create or program OTP data. It embeds a disposable AES key in the image so encrypted record handling and P-256 host pairing can be tested. CMake verifies that the generated key header matches the selected key file and stops configuration if they differ. Anyone with the UF2 can recover this test key. Do not store real input sequences or secrets on a development board.
