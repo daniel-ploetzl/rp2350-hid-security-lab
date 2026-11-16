@@ -1,17 +1,17 @@
 /*
  * ASCII to USB HID key code map, German QWERTZ (DE) layout.
  *
- *   A USB keyboard sends positional key codes plus a modifier byte, and the
+ *   A USB keyboard sends positional key codes plus a modifier byte. The
  *   host turns those into characters using its own layout. This table gives,
  *   for each printable ASCII character, the code and modifier that produce it
  *   when the host is set to German QWERTZ.
  *
  *   usage 0 means the character cannot be produced on this layout without a
- *   dead key, or is not ASCII. Callers treat that as "not typeable" rather
+ *   dead key or is not ASCII. Callers treat that as "not typeable" rather
  *   than guess. Dead-key characters (^ ` and the accents) and the non-ASCII
  *   German characters (umlauts, ß, €, §) are deliberately left out.
  *
- *   Shared by the firmware, which types, and write_config, which validates a
+ *   Shared by the firmware which types and write_config which validates a
  *   stored credential, so the two always agree on what can be typed.
  *
  *   Verify on the real host once: store a credential containing the symbols
@@ -89,7 +89,7 @@ static const hid_key_t HID_KEYMAP_DE[128] = {
     ['\\'] = {0x2D, HID_MOD_ALTGR},
 };
 
-/* Fills usage and mod for c, or returns false if it cannot be typed. */
+/* Fills usage and mod for c. Returns false when c cannot be typed. */
 static inline bool hid_key_for(char c, uint8_t *usage, uint8_t *mod)
 {
     unsigned char u = (unsigned char) c;

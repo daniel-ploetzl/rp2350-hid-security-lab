@@ -25,12 +25,16 @@
 #include "login.h"
 #include "wifi_manager.h"
 #include "flash_config.h"
+#include "secure_store.h"
+#include "pairing.h"
 #include "hid_assert.h"
 #include <assert.h>
 
 /* ───────── Flash reservation checks  ───────── */
-static_assert(LOGIN_CREDS_FLASH_ADDR - CONFIG_FLASH_XIP_BASE == HID_LAB_LINK_FLASH_BYTES,
-              "linker FLASH region must end exactly at the login credentials sector");
+#if !HID_LAB_SECURE_BUILD
+static_assert(PAIRING_FLASH_ADDR - CONFIG_FLASH_XIP_BASE == HID_LAB_LINK_FLASH_BYTES,
+              "linker FLASH region must end exactly at the host pairing sector");
+#endif
 static_assert(CONFIG_FLASH_TOTAL_BYTES == PICO_FLASH_SIZE_BYTES,
               "flash_config.h flash size must match the board");
 static_assert(CONFIG_SECTOR_SIZE_BYTES == FLASH_SECTOR_SIZE,
@@ -61,10 +65,13 @@ static void led_update(bool on)
 int main(void)
 {
     board_init();
+    /* Production needs its OTP key shares. Development uses the disposable build key. */
+    HID_ASSERT(secure_store_init());
     /* Test builds halt here, before USB starts, to prove assertions survive Release. */
     HID_ASSERT(!HID_LAB_TEST_ASSERT);
     wifi_manager_init();
     tusb_init();
+    pairing_init();
 
     uint32_t active_ms = config_read_hours() * MS_PER_HOUR;
     HID_ASSERT(active_ms >= CONFIG_HOURS_MIN * MS_PER_HOUR);
@@ -83,24 +90,41 @@ int main(void)
     reactivation_init(&react, active_ms, period_ms, now_ms());
 
     input_tasks_init();
-    login_begin(); /* Always type the initial login sequence after USB starts. */
-	led_update(true);
+#if HID_LAB_DEVELOPMENT_BUILD
+    led_update(false);
+#else
+    led_update(true);
+#endif
+    bool was_authorised = false;
 
     while (1)
     {
         tud_task();
+        pairing_task();
         wifi_manager_task();
         uint32_t now = now_ms();
-        if (reactivation_update(&react, now))
+        bool authorised = pairing_is_authorised();
+        if (authorised && !was_authorised)
+            login_begin();
+        if (!authorised && was_authorised)
+            login_begin_from(NULL);
+        was_authorised = authorised;
+        if (authorised && reactivation_update(&react, now))
             login_begin();          /* window opened: type the login first */
-        login_task(now);
+        if (authorised)
+            login_task(now);
 
         bool window = reactivation_is_active(&react);
+#if HID_LAB_DEVELOPMENT_BUILD
+        /* A steady LED proves pairing succeeded without reading a cached FAT file. */
+        led_update(pairing_is_authorised());
+#else
         led_update(status_led_state(window, now));
+#endif
 
         /* While the login types and waits it owns the keyboard, so the HID
          * behaviour is held off until login_is_done(). */
-        if (!login_in_progress())
+        if (authorised && !login_in_progress())
             input_tasks_run(window);
     }
 }

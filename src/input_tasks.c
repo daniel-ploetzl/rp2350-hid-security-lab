@@ -7,7 +7,7 @@
  *
  * Report model:
  *  - Mouse uses a single-writer flush. click_task owns the button
- *    (level state); move_task and scroll_task write transient deltas.
+ *    (level state). move_task and scroll_task write transient deltas.
  *    Only mouse_flush() transmits, so a delta can never clear a held
  *    button.
  *  - Keyboard tasks transmit directly. Each checks the send return
@@ -148,7 +148,7 @@ static void move_task(void)
     if (now < move_next)
         return;
 
-    /* Non-zero on both axes guaranteed — zero movement has no idle-reset value */
+    /* Both axes are non-zero. Zero movement would not reset the idle timer. */
     int8_t dx = (int8_t)(rand_range_i32(1, 4) * (get_rand_32() & 1 ? 1 : -1));
     int8_t dy = (int8_t)(rand_range_i32(1, 4) * (get_rand_32() & 1 ? 1 : -1));
 

@@ -6,7 +6,7 @@
  *   wall clock and no network are needed, so this runs with or without Wi-Fi.
  *
  *   The active window begins with a one-shot edge, which is where the login
- *   sequence will run once credentials are in place.
+ *   sequence will run once its record is provisioned.
  */
 
 #ifndef REACTIVATION_H
