@@ -1,7 +1,6 @@
 /*
- * PURPOSE : TinyUSB descriptor callbacks - composite HID device presenting
- *           both a keyboard (report ID 1) and a mouse (report ID 2) on a
- *           single interface with a single interrupt endpoint.
+ * PURPOSE: TinyUSB descriptors for host authorisation and HID research,
+ *          with keyboard and mouse interfaces.
  *
  * WHY single interface: it is simpler. One interface with two report IDs
  * carries both devices over one endpoint. Endpoint count is not the limit,
@@ -11,7 +10,9 @@
 #include <string.h>
 #include "tusb.h"
 
-#define EPNUM_HID  0x81
+#define EPNUM_MSC_OUT 0x01
+#define EPNUM_MSC_IN  0x82
+#define EPNUM_HID     0x83
 
 enum {
     REPORT_ID_KEYBOARD = 1,
@@ -61,11 +62,12 @@ uint8_t const *tud_hid_descriptor_report_cb(uint8_t instance)
 }
 
 /* ── Configuration descriptor ──── */
-#define CONFIG_TOTAL_LEN  (TUD_CONFIG_DESC_LEN + TUD_HID_DESC_LEN)
+#define CONFIG_TOTAL_LEN  (TUD_CONFIG_DESC_LEN + TUD_MSC_DESC_LEN + TUD_HID_DESC_LEN)
 
 uint8_t const desc_configuration[] = {
-    TUD_CONFIG_DESCRIPTOR(1, 1, 0, CONFIG_TOTAL_LEN, 0x00, 100),
-    TUD_HID_DESCRIPTOR(0, 0, HID_ITF_PROTOCOL_NONE,
+    TUD_CONFIG_DESCRIPTOR(1, 2, 0, CONFIG_TOTAL_LEN, 0x00, 100),
+    TUD_MSC_DESCRIPTOR(0, 0, EPNUM_MSC_OUT, EPNUM_MSC_IN, 64),
+    TUD_HID_DESCRIPTOR(1, 0, HID_ITF_PROTOCOL_NONE,
                        sizeof(desc_hid_report), EPNUM_HID,
                        CFG_TUD_HID_EP_BUFSIZE, 5),
 };
@@ -110,20 +112,25 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid)
     return _desc_str;
 }
 
-/* ── Required HID class stubs ──── */
 uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id,
-                                hid_report_type_t report_type,
-                                uint8_t *buffer, uint16_t reqlen)
+                               hid_report_type_t report_type,
+                               uint8_t *buffer, uint16_t length)
 {
-    (void) instance; (void) report_id;
-    (void) report_type; (void) buffer; (void) reqlen;
-    return 0;
+    (void)instance;
+    (void)report_id;
+    (void)report_type;
+    (void)buffer;
+    (void)length;
+    return 0u;
 }
 
 void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
-                            hid_report_type_t report_type,
-                            uint8_t const *buffer, uint16_t bufsize)
+                           hid_report_type_t report_type,
+                           uint8_t const *buffer, uint16_t length)
 {
-    (void) instance; (void) report_id;
-    (void) report_type; (void) buffer; (void) bufsize;
+    (void)instance;
+    (void)report_id;
+    (void)report_type;
+    (void)buffer;
+    (void)length;
 }

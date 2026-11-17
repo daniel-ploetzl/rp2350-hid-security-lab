@@ -11,6 +11,7 @@
 
 #include "wifi_manager.h"
 #include "flash_config.h"
+#include "secure_store.h"
 #include "pico/cyw43_arch.h"
 #include "pico/time.h"
 #include "hid_assert.h"
@@ -32,6 +33,7 @@ static bool         s_radio_ok;
 static uint32_t     s_state_since_ms;
 static uint32_t     s_backoff_ms = BACKOFF_MIN_MS;
 static uint32_t     s_retry_delay_ms;
+static wifi_creds_t s_creds_storage;
 static const wifi_creds_t *s_creds;
 
 static inline uint32_t now_ms(void)
@@ -80,7 +82,7 @@ static void start_join(uint32_t now)
 }
 
 /* Blocks while the radio firmware loads, so call it before tusb_init().
- * On failure HID carries on; only the LED and networking are lost. */
+ * On failure HID carries on. Only the LED and networking are lost. */
 void wifi_manager_init(void)
 {
     if (cyw43_arch_init() != 0)
@@ -90,7 +92,7 @@ void wifi_manager_init(void)
     cyw43_arch_enable_sta_mode();
 
     /* Without valid credentials the radio still runs the LED, but never joins. */
-    s_creds = creds_read();
+    s_creds = secure_store_read_wifi(&s_creds_storage) ? &s_creds_storage : NULL;
     if (s_creds)
         start_join(now_ms());
 }
@@ -140,7 +142,7 @@ bool wifi_manager_is_up(void)
     return s_state == WIFI_UP;
 }
 
-/* Solid: online, or no network configured. Blinking: not online yet, which
+/* Solid: online or no network configured. Blinking: not online yet, which
  * includes joined without a DHCP lease. Off: run finished. */
 bool status_led_state(bool active, uint32_t now)
 {

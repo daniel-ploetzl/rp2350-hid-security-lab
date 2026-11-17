@@ -21,7 +21,7 @@
 #define CONFIG_PERIOD_MAX_S      604800UL
 #define CONFIG_DEFAULT_PERIOD_S  604800UL
 
-/* A sector of its own, so changing the run time cannot erase the credentials. */
+/* A sector of its own, storing an authenticated encrypted Wi-Fi record. */
 #define CREDS_FLASH_ADDR         (CONFIG_FLASH_ADDR - CONFIG_SECTOR_SIZE_BYTES)
 #define CREDS_MAGIC              0x57494649UL
 #define CREDS_VERSION            1UL
@@ -31,14 +31,28 @@
 #define CREDS_KEY_MIN            8
 #define CREDS_KEY_MAX            64
 
-/* A third sector below the Wi-Fi one, holding the login username and password
- * the device types at re-activation. Separate so a run-time or Wi-Fi change
- * cannot erase it. */
+/* A sector below Wi-Fi holds the authenticated encrypted input sequence.
+ * The preceding sector stores the authenticated host pairing public key. */
 #define LOGIN_CREDS_FLASH_ADDR   (CREDS_FLASH_ADDR - CONFIG_SECTOR_SIZE_BYTES)
 #define LOGIN_MAGIC              0x4C4F4749UL   /* "LOGI" */
-#define LOGIN_VERSION            1UL
+#define LOGIN_VERSION            2UL
 #define LOGIN_USER_MAX           64
 #define LOGIN_PASS_MAX           64
+#define LOGIN_COMMAND_MAX        64
+#define PAIRING_FLASH_ADDR       (LOGIN_CREDS_FLASH_ADDR - CONFIG_SECTOR_SIZE_BYTES)
+#define PAIRING_MAGIC            0x50414952UL
+#define PAIRING_VERSION          1UL
+#define PAIRING_PUBLIC_KEY_BYTES 65UL
+#define PAIRING_CHALLENGE_BYTES  32UL
+#define PAIRING_SIGNATURE_PART_BYTES 32u
+#define PAIRING_STATUS_UNPAIRED  0u
+#define PAIRING_STATUS_PENDING   1u
+#define PAIRING_STATUS_ALLOWED   2u
+#define SECURE_RECORD_MAGIC      0x53454352UL /* "SECR" */
+#define SECURE_RECORD_VERSION    1UL
+#define SECURE_RECORD_NONCE_BYTES 12
+#define SECURE_RECORD_TAG_BYTES  16
+#define SECURE_CRED_KEY_PAGE     24UL
 
 typedef struct {
     uint32_t magic;
@@ -57,20 +71,43 @@ typedef struct {
     uint32_t crc;
 } wifi_creds_t;
 
-/* The typed login. Same record discipline as the Wi-Fi one: magic, version,
- * NUL-terminated strings and a CRC. reserved aligns crc to 4 bytes. */
+/* Plaintext input sequence payload. It is held in SRAM only after GCM authentication.
+ * Magic, version, strings and CRC are stored here. Reserved aligns CRC to 4 bytes. */
 typedef struct {
     uint32_t magic;
     uint32_t version;
     char     user[LOGIN_USER_MAX + 1];
     char     pass[LOGIN_PASS_MAX + 1];
+    char     command[LOGIN_COMMAND_MAX + 1];
     uint8_t  reserved[2];
     uint32_t crc;
 } login_creds_t;
 
+/* P-256 host public key encrypted with the device record key. */
+typedef struct {
+    uint32_t magic;
+    uint32_t version;
+    uint8_t public_key[PAIRING_PUBLIC_KEY_BYTES];
+    uint8_t reserved[3];
+    uint32_t crc;
+} pairing_config_t;
+
+/* Fixed-size AES-GCM envelope shared by Wi-Fi and input sequence payloads. */
+typedef struct {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t payload_len;
+    uint8_t  nonce[SECURE_RECORD_NONCE_BYTES];
+    uint8_t  ciphertext[sizeof(login_creds_t)];
+    uint8_t  tag[SECURE_RECORD_TAG_BYTES];
+    uint8_t  reserved[4];
+} secure_record_t;
+
 _Static_assert(sizeof(pico_config_t) == 12, "config layout changed, update write_config.c");
 _Static_assert(sizeof(wifi_creds_t) == 116, "credentials layout changed, raise CREDS_VERSION");
-_Static_assert(sizeof(login_creds_t) == 144, "login layout changed, raise LOGIN_VERSION");
+_Static_assert(sizeof(login_creds_t) == 212, "login layout changed, raise LOGIN_VERSION");
+_Static_assert(sizeof(pairing_config_t) == 80, "pairing layout changed, raise PAIRING_VERSION");
+_Static_assert(sizeof(secure_record_t) == 256, "secure record must fit one UF2 payload");
 
 static inline uint32_t config_read_hours(void)
 {
@@ -113,25 +150,23 @@ static inline uint32_t creds_crc32(const void *data, size_t len)
     return ~crc;
 }
 
-/* Returns NULL unless the whole record is valid, so bad data can never start a join. */
-static inline const wifi_creds_t *creds_read(void)
+/* Validation split so encrypted records are checked only after authentication. */
+static inline bool wifi_creds_valid(const wifi_creds_t *creds)
 {
-    const wifi_creds_t *creds = (const wifi_creds_t *) CREDS_FLASH_ADDR;
-
     if (creds->magic != CREDS_MAGIC || creds->version != CREDS_VERSION)
-        return NULL;
+        return false;
     if (creds->crc != creds_crc32(creds, offsetof(wifi_creds_t, crc)))
-        return NULL;
+        return false;
     if (creds->auth != CREDS_AUTH_WPA2 && creds->auth != CREDS_AUTH_WPA3)
-        return NULL;
+        return false;
     if (creds->ssid[0] == '\0' || creds->ssid[CREDS_SSID_MAX] != '\0' ||
         creds->key[CREDS_KEY_MAX] != '\0')
-        return NULL;
-    return creds;
+        return false;
+    return true;
 }
 
 /* Validation split out so it can run on the host against a crafted record.
- * The username must be present, the password may be empty. */
+ * Sequence values one and three must be present. Value two may be empty. */
 static inline bool login_valid(const login_creds_t *lc)
 {
     if (lc->magic != LOGIN_MAGIC || lc->version != LOGIN_VERSION)
@@ -140,16 +175,20 @@ static inline bool login_valid(const login_creds_t *lc)
         return false;
     if (lc->user[0] == '\0' ||
         lc->user[LOGIN_USER_MAX] != '\0' ||
-        lc->pass[LOGIN_PASS_MAX] != '\0')
+        lc->pass[LOGIN_PASS_MAX] != '\0' ||
+        lc->command[0] == '\0' ||
+        lc->command[LOGIN_COMMAND_MAX] != '\0')
         return false;
     return true;
 }
 
-/* Returns NULL unless the whole record is valid, so the device never types garbage. */
-static inline const login_creds_t *login_read(void)
+static inline bool pairing_config_valid(const pairing_config_t *cfg)
 {
-    const login_creds_t *lc = (const login_creds_t *) LOGIN_CREDS_FLASH_ADDR;
-    return login_valid(lc) ? lc : NULL;
+    if (cfg->magic != PAIRING_MAGIC || cfg->version != PAIRING_VERSION)
+        return false;
+    if (cfg->crc != creds_crc32(cfg, offsetof(pairing_config_t, crc)))
+        return false;
+    return cfg->public_key[0] == 0x04u;
 }
 
 #endif

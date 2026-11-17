@@ -1,331 +1,44 @@
-# hid-lab: USB HID Behaviour Simulation Lab (Raspberry Pi Pico 2 / Pico 2 W)
+# RP2350 HID Security Lab
 
-## Overview
+An RP2350 firmware research project for analysing USB HID behaviour, host authorisation and secure embedded design on the Raspberry Pi Pico 2 and Pico 2 W.
 
-This project implements a composite USB Human Interface Device (HID) behaviour simulator on Raspberry Pi Pico 2 and Pico 2 W. Wi-Fi is available on the Pico 2 W only.
-It generates time-driven, non-deterministic keyboard and mouse activity for research and educational analysis of:
+This portfolio project demonstrates RP2350 firmware engineering through USB HID report modelling, a cryptographic host authorisation protocol and protected configuration storage. Its purpose is to explore how embedded security features interact with device behaviour and host software.
 
-- USB HID behaviour modelling
-- host-side classification and heuristic detection
-- embedded scheduling under non-blocking timing constraints
+## What it demonstrates
 
----
+- Cooperative, non-blocking firmware with independent keyboard and mouse state machines
+- Composite USB HID with keyboard, mouse and a RAM-backed pairing volume
+- Fresh challenge and signature based host authorisation before HID reports are released
+- AES-GCM encrypted configuration records and RP2350 secure boot and OTP integration
+- C firmware and configuration writer, with Python host utilities and tests
 
-## Engineering properties
+## Security boundary
 
-- **Cooperative non-blocking scheduling:** one main loop with no RTOS, threads or sleeping, so USB and Wi-Fi are serviced on every pass
-- **Single-writer mouse report:** only `mouse_flush()` transmits, so movement or scrolling cannot clear a held button
-- **Checked HID sends:** a state machine advances only once its report is queued, so a busy endpoint cannot lose a release
-- **Build-time flash layout checks:** the build fails if the linker region, board flash size or sector size disagrees with the reserved sector layout
-- **Validated credential record:** Wi-Fi settings live in their own flash sector as a versioned record with a CRC-32 and an invalid record means no join
-- **Image sizes:** 22 KB (Pico 2) and 301 KB (Pico 2 W) as `.bin`. The `.uf2` files are about twice that, 44 KB and 603 KB, because each 512-byte UF2 block carries 256 bytes of firmware
+Host authorisation gates simulated HID reports on proof of possession of an enrolled key. It does not conceal reports from the authorised host or a USB capture device. Decrypted input data and cryptographic key material exist in device memory at runtime. Development builds use recoverable test keys and must never contain real secrets or be provisioned as production devices.
 
----
+## Build and test
 
-## Architecture
+The firmware requires the Raspberry Pi Pico SDK with RP2350 support, CMake and the ARM GCC toolchain. Secure builds also require protected signing, AES and IV key files. See [EXPLAINED.md](EXPLAINED.md) for key handling, development pairing, provisioning limits and host setup.
 
-### Firmware (device-side)
-
-- `src/main.c`
-  Cooperative scheduler:
-  - runs TinyUSB device task (`tud_task()`)
-  - drives the active then idle re-activation cycle
-  - dispatches behaviour subsystems
-
-- `src/input_tasks.c`
-  Behaviour engine implementing independent state machines for HID actions.
-
-- `src/reactivation.c`
-  Re-activation timer: the active then idle duty cycle that repeats for ever.
-
-- `src/login.c`
-  Login typist: starts at boot and each later re-activation, typing the username, Return, password, Return, waiting 15 seconds, then typing `<command>`, Return before HID activity starts.
-
-- `src/wifi_manager.c` (Pico 2 W only)
-  Non-blocking station state machine: connect, monitor link, reconnect with backoff.
-
-- `src/usb_descriptors.c`
-  USB descriptor definitions for composite HID device:
-  - keyboard interface
-  - mouse interface
-  - report ID mapping
-
-### Shared configuration
-
-- `inc/flash_config.h`
-  Flash layout definitions and configuration read/validation logic.
-
-- `inc/hid_keymap.h`
-  ASCII to HID key-code map for the German QWERTZ layout, shared by the firmware and `write_config`.
-
-### Host utility
-
-- `src/write_config.c`
-  Host-side tool that generates a UF2 payload to write the run time, Wi-Fi credentials or login credentials into a reserved flash sector.
-
----
-
-## Execution Model
-
-The firmware is based on a **cooperative, non-preemptive scheduling loop**:
-
-- `tud_task()` must be called continuously for USB stack progress
-- `wifi_manager_task()` services the radio through `cyw43_arch_poll()` from the same loop, with no background thread or interrupt
-- `reactivation_update()` advances the active then idle cycle and signals the start of each active window
-- `input_tasks_run(active)` executes all HID behaviour logic
-- timing is derived from a monotonic millisecond clock:
-  `to_ms_since_boot(get_absolute_time())`
-
-### Re-activation cycle
-
-Activity repeats on a fixed cycle rather than running once. The device is active for the configured window, idle for the period, then active again with no end.
-
-- the active window length is the stored `hours` value
-- the idle period is read from the flash config in seconds, from 1 second to 1 week, and defaults to 1 week
-- the first window opens at boot
-- each window begins with a one-shot edge that runs the login and post-login command sequence before activity starts
-- the timer keeps each phase well under the 49.7-day clock wrap, so the rollover does not disturb the cadence
-
-### Constraint model
-
-- No blocking delays (`sleep`, busy-wait loops) in behaviour logic
-- Elapsed-time checks use wrap-safe modular subtraction on timestamps. Each re-activation phase is bounded well under the 49.7-day clock wrap, so the cycle keeps its cadence across a rollover
-- USB stack responsiveness is preserved at all times
-
----
-
-## Behaviour Model
-
-Input generation is implemented as independent time-based state machines:
-
-- mouse movement bursts
-- mouse click events
-- keyboard key presses
-- typing bursts
-- scroll events
-- window switching sequences (ALT+TAB)
-
-### Timing model
-
-- intervals are bounded random values (uniform distribution unless otherwise stated)
-- randomness is sourced from `pico_rand`, a PRNG seeded from several entropy sources on the RP2350, the hardware TRNG among them
-- each subsystem operates independently (no global synchronisation)
-
-### Report model
-
-A HID report carries the full current state of the device, so overlapping subsystems must not each transmit their own report.
-
-- the mouse uses a single-writer flush: `click_task` owns the button (level state) whilst `move_task` and `scroll_task` write transient deltas, and only `mouse_flush()` transmits, so a movement or scroll cannot clear a held button
-- the keyboard subsystems transmit directly, one activity at a time in practice given the interval spacing
-- every send checks its return value and advances its state machine only once the report is queued, so a busy endpoint never drops one half of a press or release pair
-
----
-
-## USB HID Model
-
-The device is implemented as a **composite HID interface with report IDs**:
-
-- Report ID 1: keyboard
-- Report ID 2: mouse
-
-### Descriptor constraints
-
-- Control endpoint size: 64 bytes (`CFG_TUD_ENDPOINT0_SIZE`)
-- HID interrupt buffer size: 16 bytes (`CFG_TUD_HID_EP_BUFSIZE`)
-- Polling interval: 5 ms (HID `bInterval`)
-
----
-
-## Flash Layout and Safety
-
-Pico 2 and Pico 2 W flash map (4 MB):
-
-- Firmware region: `0x10000000 .. 0x103FCFFF` (`0x003FD000` bytes)
-- Reserved login credentials sector: `0x103FD000 .. 0x103FDFFF`
-- Reserved Wi-Fi credentials sector: `0x103FE000 .. 0x103FEFFF`
-- Reserved config sector: `0x103FF000 .. 0x103FFFFF` (last 4 KB sector)
-
-### Safety invariant
-
-The firmware image must end before the reserved sectors. If it overlapped them, the firmware would read its own bytes as settings and fall back to `CONFIG_DEFAULT_HOURS`, no Wi-Fi and no login. Writing settings would overwrite part of the firmware.
-
-Enforced at build time:
-
-- the `PICO_FLASH_SIZE_BYTES` CMake variable limits the linker's `FLASH` region to `0x003FD000` bytes, so an oversized image fails to link
-- `static_assert`s in `src/main.c` fail the build unless the linker region ends exactly at `LOGIN_CREDS_FLASH_ADDR`, the lowest reserved sector, and `flash_config.h` matches the board's flash size and sector size
-- `_Static_assert`s in `inc/flash_config.h` fail both the firmware and host builds if `pico_config_t`, `wifi_creds_t` or `login_creds_t` changes size
-- `PICO_BOARD` defaults to `pico2_w` and CMake configuration fails for any non-RP2350 platform
-
-The checks exist because the layout is defined in two places, `CMakeLists.txt` and `inc/flash_config.h`. Without them, either side could change and the build would still succeed.
-
-Limits of this protection:
-
-- the reduced size applies to the linker only. C code still sees the board's real size in `PICO_FLASH_SIZE_BYTES` and must: the SDK derives the flash device size from it and needs a power of two and its bounds check would otherwise reject the reserved sectors
-- writing only to the reserved sectors is a convention, not a restriction. `write_config` is the only writer in this repository, but nothing stops another UF2 or a flash API call from changing them
-
----
-
-## Wi-Fi
-
-Built when the board has a CYW43 radio. On a Pico 2 the same API compiles to inline stubs.
-
-- `wifi_manager_task()` runs from the main loop and never blocks, so a network failure cannot delay USB or HID behaviour
-- a join that fails, or finds no DHCP lease within 30 s, retries after 2 s, doubling to 60 s. A wrong password retries at 60 s
-- DHCP and DNS are provided by lwIP, which is configured for UDP only in `inc/lwipopts.h`
-- the status LED is on the radio chip, so it needs the radio to start. Solid means online or no network configured, blinking means not online yet (including joined with no DHCP lease) and off means the run has finished
-
-### Credentials
-
-Credentials are not built into the firmware. Connect the board in BOOTSEL mode and store them in its credentials sector:
-
-```bash
-./write_config --wifi wpa2 "your-network"
+```sh
+cmake -S . -B build \
+  -DHID_LAB_SIGNING_KEY=/secure/path/signing.pem \
+  -DHID_LAB_AES_KEY=/secure/path/device-aes.bin \
+  -DHID_LAB_IV_SALT=/secure/path/device-iv.bin
+cmake --build build -j2
+python3 -m unittest discover -s tests -v
 ```
 
-The tool asks for the password or reads it from standard input, so it does not reach the shell history or process list. Use `wpa3` for WPA3-Personal. There is no automatic fallback between the two.
+The Python tests use temporary files. They do not access a board or program OTP. CI firmware artifacts use disposable keys and are for build verification only.
 
-The sector survives firmware updates, so this is needed once per board. Without a valid record the firmware makes no connection attempt. To remove the credentials from a board:
+## Repository map
 
-```bash
-./write_config --wifi-clear
-```
+- `src/` firmware and the C configuration writer
+- `inc/` firmware interfaces and configuration definitions
+- `tools/` build helpers and the Linux pairing agent
+- `systemd/user/` optional rootless host pairing timer
+- `tests/` host-side tests
 
-The password is stored in plaintext in the board's flash, so anyone with physical access can read it. Use a dedicated network.
+## Scope
 
----
-
-## Configuration System
-
-Flash layout (12 bytes total):
-
-```c
-typedef struct {
-    uint32_t magic;
-    uint32_t hours;
-    uint32_t period_s;
-} pico_config_t;
-```
-
-### Validation rules:
-
-- `magic == 0xCAFEF00E`
-- `hours` in `[1, 24]`, the length of each active window in the re-activation cycle
-- `period_s` in `[1, 604800]`, the idle gap in seconds, up to 1 week
-
-Each field falls back to its default if the record is invalid.
-
-### Fallback behaviour:
-
-If validation fails (erased flash, corruption or invalid values):
-
-  - firmware uses `CONFIG_DEFAULT_HOURS`
-  - system behaviour remains deterministic
-
-### Design note
-
-  The magic value is a **struct validity marker**, not a security mechanism.
-  No cryptographic integrity protection is (yet) implemented.
-
----
-
-## Host Configuration Writer
-
-### Build
-
-```bash
-gcc src/write_config.c -Iinc -o write_config
-```
-
-### Usage
-
-```bash
-./write_config <hours> [period]
-./write_config --wifi <wpa2|wpa3> <ssid>
-./write_config --wifi-clear
-./write_config --login <username>
-./write_config --login-clear
-```
-
-### Output
-
-Generates a UF2 payload that writes one record into its reserved flash sector. The config write sets the run window and the re-activation period together, because they share a sector. The credentials live in a separate sector and are changed on their own. `period` accepts seconds or an integer with an `s`, `m`, `h`, `d` or `w` suffix, for example `7d`, and defaults to 1 week when left out.
-
-### Credential record
-
-`wifi_creds_t` in `inc/flash_config.h` holds a magic value, version, security mode, SSID, password and CRC-32. The firmware makes no connection attempt unless every field is valid. The CRC detects corruption only, it does not protect the password.
-
-`login_creds_t` holds the same way a magic value, version, username, password and CRC-32. `--login` reads the password from standard input and rejects any character the German layout cannot type, so an unstoreable password fails here rather than mistyping at the keyboard.
-
----
-
-## Login
-
-Before typing credentials, the device waits for the HID endpoint to remain ready for 2 seconds. This gives the host input layer time to initialise. USB servicing continues during this wait. The separate 15 second wait still follows the password and Return.
-
-At boot, then at each later re-activation, the device types the stored username, Return, the password, Return, waits 15 seconds for the host to accept the login, then types `blackscreen 12.56`, Return before the simulated activity starts.
-
-- credentials live in their own flash sector, written once per board with `--login`, so a run-time or Wi-Fi change never erases them. Without a valid record the device types nothing and goes straight to activity
-- the typist is non-blocking: it sends one key report per loop pass and advances only when the report is accepted, so it never stalls USB
-- every key down is followed by its release, so the host sees each character once and nothing auto-repeats
-- `blackscreen 12.56` is a firmware-defined post-login command, typed only after the 15-second host-login wait and followed by Return
-- the host layout is German QWERTZ. The device sends positional key codes, so `z` is sent as the physical key US keyboards label `Y`, and symbols such as `@` and `{ [ ] }` use AltGr. Characters the layout reaches only through a dead key (`^`, the accents) and non-ASCII characters (umlauts, `ß`, `€`) cannot be typed and are rejected when the credential is stored
-- the password is held in plaintext in flash and briefly in RAM while typing. An OTP-backed encrypted store is the planned next step
-
----
-
-## Build System
-
-### Requirements
-
-- Raspberry Pi Pico SDK (>= 2.0.0)
-- CMake >= 3.13
-- ARM GCC toolchain
-
-### Build
-
-```bash
-cmake -S . -B build
-cmake --build build -j"$(nproc)"
-```
-
-Use one build directory per board. For a Pico 2 without Wi-Fi:
-
-```bash
-cmake -S . -B build-pico2 -DPICO_BOARD=pico2
-cmake --build build-pico2 -j"$(nproc)"
-```
-
-`PICO_BOARD` defaults to `pico2_w`. `cmake --build` works regardless of whether CMake selected Ninja or Unix Makefiles. An existing build directory keeps the board it was configured with, so a build directory created for another board fails until it is removed.
-
-### Outputs
-
-- .uf2 firmware image
-- .elf executable
-- .bin raw binary
-
----
-
-## Verification
-
-Device behaviour is observed host-side on Linux.
-
-- `sudo evtest` on the keyboard and mouse event nodes shows the raw event stream. The invariant: every key or button down has a matching up before the next unrelated event and ALT is released cleanly after each ALT+TAB.
-- `sudo usbhid-dump -m 2e8a:0003 -e stream` shows raw reports. During a click hold the mouse button field stays set whilst only the delta bytes vary.
-
----
-
-## Known issues
-
-| Severity | Location | Issue |
-|---|---|---|
-| Low | `src/usb_descriptors.c` | Product ID `0x0003` belongs to the RP2040 USB boot mode. |
-| Risk | `src/wifi_manager.c` | Worst-case main loop time with Wi-Fi has not been measured against the 5 ms HID interval. |
-| Risk | `inc/flash_config.h` | The Wi-Fi and login passwords are stored in plaintext in their flash sectors, so physical access to the board reveals them. An OTP-backed encrypted store is planned. |
-| Low | `src/input_tasks.c` | After a long idle, each behaviour whose timer has already elapsed fires once on the first active pass, a brief catch-up at the start of a window. |
-| Risk | `inc/hid_keymap.h` | The DE QWERTZ map is from the layout spec and is not yet verified against a real German host. Store a known credential and check the typed characters before relying on it. |
-
----
-
-## Disclaimer
-
-This project is intended for embedded systems research and educational analysis of USB HID behaviour and host-side detection mechanisms.
+This is a security design and research prototype. Its threat model, limitations, setup instructions and implementation notes are documented in [EXPLAINED.md](EXPLAINED.md).

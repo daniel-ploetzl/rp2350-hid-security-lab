@@ -1,0 +1,11 @@
+[Unit]
+Description=Check for the paired HID Lab board
+
+[Timer]
+OnBootSec=2s
+OnUnitActiveSec=2s
+AccuracySec=1s
+Unit=hid-lab-pair.service
+
+[Install]
+WantedBy=timers.target

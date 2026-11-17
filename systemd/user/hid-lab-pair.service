@@ -1,0 +1,13 @@
+[Unit]
+Description=Exchange the paired HID Lab challenge through USB storage
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/.local/libexec/hid-lab/pair_host.py --key %h/.config/hid-lab/host-private.pem
+TimeoutStartSec=10s
+UMask=0077
+NoNewPrivileges=yes
+PrivateUsers=yes
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=yes

@@ -22,7 +22,7 @@ jobs:
       - name: Install toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake gcc-arm-none-eabi libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib
+          sudo apt-get install -y cmake gcc-arm-none-eabi libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib libssl-dev
 
       - name: Fetch Pico SDK
         run: |
@@ -30,15 +30,26 @@ jobs:
             https://github.com/raspberrypi/pico-sdk.git "$RUNNER_TEMP/pico-sdk"
           echo "PICO_SDK_PATH=$RUNNER_TEMP/pico-sdk" >> "$GITHUB_ENV"
 
+      - name: Create disposable build keys
+        run: |
+          umask 077
+          openssl ecparam -name secp256k1 -genkey -noout -out "$RUNNER_TEMP/hid-lab-signing.pem"
+          openssl rand -out "$RUNNER_TEMP/hid-lab-device-aes.bin" 32
+          openssl rand -out "$RUNNER_TEMP/hid-lab-device-iv.bin" 16
+
       - name: Build firmware
         run: |
           /usr/bin/cmake --version
           arm-none-eabi-gcc --version
-          /usr/bin/cmake -S . -B build-${{ matrix.board }} -DPICO_BOARD=${{ matrix.board }}
+          /usr/bin/cmake -S . -B build-${{ matrix.board }} \
+            -DPICO_BOARD=${{ matrix.board }} \
+            -DHID_LAB_SIGNING_KEY="$RUNNER_TEMP/hid-lab-signing.pem" \
+            -DHID_LAB_AES_KEY="$RUNNER_TEMP/hid-lab-device-aes.bin" \
+            -DHID_LAB_IV_SALT="$RUNNER_TEMP/hid-lab-device-iv.bin"
           /usr/bin/cmake --build build-${{ matrix.board }} -j"$(nproc)"
 
       - name: Build host tool
-        run: gcc -Wall -Wextra -Werror src/write_config.c -Iinc -o write_config
+        run: gcc -D_GNU_SOURCE -std=c11 -Wall -Wextra -Werror src/write_config.c -Iinc -lcrypto -o write_config
 
       - name: Write checksum
         working-directory: build-${{ matrix.board }}
@@ -46,7 +57,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: hid_lab-${{ matrix.board }}
+          name: hid_lab-ci-not-deployable-${{ matrix.board }}
           path: |
             build-${{ matrix.board }}/hid_lab.uf2
             build-${{ matrix.board }}/hid_lab.uf2.sha256
