@@ -1,7 +1,5 @@
 #include "secure_store.h"
-
 #include "flash_config.h"
-
 #include <mbedtls/gcm.h>
 #include <string.h>
 

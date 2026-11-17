@@ -12,4 +12,9 @@ bool pairing_is_authorised(void);
 void pairing_read_challenge(uint8_t *buffer, uint16_t length);
 void pairing_submit_response(const uint8_t *buffer, uint16_t length);
 
+/* RAM-backed MSC storage keeps challenge exchange independent of hidraw. */
+void pairing_storage_init(void);
+void pairing_storage_new_session(void);
+void pairing_storage_set_challenge(const uint8_t *challenge, uint16_t length);
+
 #endif

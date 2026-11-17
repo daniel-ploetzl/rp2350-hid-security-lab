@@ -1,15 +1,15 @@
 /*
- * HID Behaviour Simulation Lab (RP2350 / Pico 2 and Pico 2 W)
+ * RP2350 HID Security Lab (Pico 2 and Pico 2 W)
  *
- *   Simulate realistic human input patterns via USB HID to analyse
- *   system behaviour, detection mechanisms and activity heuristics.
+ *   Model USB HID input behaviour to study embedded security, host-side
+ *   detection mechanisms and activity heuristics.
  *
  * CORE IDEAS :
  *   - time-based state machines per activity
  *   - randomised intervals to avoid deterministic patterns
  *   - separation of USB layer and behaviour logic
  *
- * RESEARCH FOCUS :
+ * RESEARCH FOCUS:
  *   - host-side detection of synthetic input
  *   - HID behaviour modelling
  *   - behavioural analysis of input streams
@@ -110,7 +110,7 @@ int main(void)
             login_begin_from(NULL);
         was_authorised = authorised;
         if (authorised && reactivation_update(&react, now))
-            login_begin();          /* window opened: type the login first */
+            login_begin();          /* window opened: run the stored input sequence first */
         if (authorised)
             login_task(now);
 
@@ -122,8 +122,8 @@ int main(void)
         led_update(status_led_state(window, now));
 #endif
 
-        /* While the login types and waits it owns the keyboard, so the HID
-         * behaviour is held off until login_is_done(). */
+        /* The stored input sequence owns the keyboard until it completes.
+         * HID behaviour starts after login_is_done(). */
         if (authorised && !login_in_progress())
             input_tasks_run(window);
     }

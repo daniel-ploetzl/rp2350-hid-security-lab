@@ -1,10 +1,7 @@
 /* Verify the mounted-volume response before allowing keyboard or mouse reports. */
 #include "pairing.h"
-
 #include "flash_config.h"
 #include "secure_store.h"
-#include "pairing_storage.h"
-
 #include "mbedtls/ecdsa.h"
 #include "mbedtls/ecp.h"
 #include "mbedtls/bignum.h"
@@ -12,7 +9,6 @@
 #include "pico/rand.h"
 #include "pico/unique_id.h"
 #include "tusb.h"
-
 #include <string.h>
 
 #define PAIRING_MESSAGE_BYTES 56u

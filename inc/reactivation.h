@@ -5,8 +5,8 @@
  *   device is active for a window, idle for a period, then active again. No
  *   wall clock and no network are needed, so this runs with or without Wi-Fi.
  *
- *   The active window begins with a one-shot edge, which is where the login
- *   sequence will run once its record is provisioned.
+ *   The active window begins with a one-shot edge, which starts the stored
+ *   input sequence once its record is provisioned.
  */
 
 #ifndef REACTIVATION_H
@@ -36,7 +36,7 @@ void reactivation_init(reactivation_t *r, uint32_t active_ms,
                        uint32_t period_ms, uint32_t now);
 
 /* Advances the cycle. Returns true only on the single call where an active
- * window begins, which is where the login sequence should run. */
+ * window begins, which is where the stored input sequence should run. */
 bool reactivation_update(reactivation_t *r, uint32_t now);
 
 static inline bool reactivation_is_active(const reactivation_t *r)

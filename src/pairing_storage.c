@@ -1,9 +1,6 @@
 /* RAM-backed FAT12 media keeps the challenge exchange independent of hidraw. */
-#include "pairing_storage.h"
-
 #include "pairing.h"
 #include "tusb.h"
-
 #include <string.h>
 
 #define DISK_BLOCK_COUNT 128u

@@ -1,12 +1,11 @@
 /*
- * Login typist. See inc/login.h for the model.
+ * Stored input sequence state machine. See inc/login.h for its model.
  *
- *   The sequence to type is flattened once at the start into s_seq: the
- *   stored input sequence. After the host-session wait it appends the final
- *   command. Each pass sends one report,
- *   alternating a key down with its release and advances only when the report
- *   was accepted. After the last key it clears the buffer so the sequence does
- *   not linger in RAM.
+ *   The sequence to type is flattened once at the start into s_seq. After
+ *   the host-session wait it appends the final configured action. Each pass
+ *   sends one report, alternating a key down with its release, and advances
+ *   only when the report was accepted. After the last key it clears the buffer
+ *   so the sequence does not linger in RAM.
  */
 
 #include "login.h"
@@ -14,7 +13,6 @@
 #include "hid_assert.h"
 #include "secure_store.h"
 #include "tusb.h"
-
 #include <string.h>
 
 #define REPORT_ID_KEYBOARD 1

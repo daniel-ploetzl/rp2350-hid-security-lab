@@ -12,9 +12,9 @@
  *   German characters (umlauts, ß, €, §) are deliberately left out.
  *
  *   Shared by the firmware which types and write_config which validates a
- *   stored credential, so the two always agree on what can be typed.
+ *   stored input sequence, so the writer and firmware agree on typeable characters.
  *
- *   Verify on the real host once: store a credential containing the symbols
+ *   Verify on the target host: store an input sequence containing the symbols
  *   you use and watch them appear in a text field. The table is from the DE
  *   layout spec and has not been checked against your exact host.
  */

@@ -1,6 +1,6 @@
 /*
- * PURPOSE : TinyUSB descriptor callbacks for a pairing mass storage device
- *           and a keyboard and mouse HID interface.
+ * PURPOSE: TinyUSB descriptors for host authorisation and HID research,
+ *          with keyboard and mouse interfaces.
  *
  * WHY single interface: it is simpler. One interface with two report IDs
  * carries both devices over one endpoint. Endpoint count is not the limit,

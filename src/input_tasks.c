@@ -1,5 +1,5 @@
 /*
- * HID behaviour engine for USB input simulation.
+ * HID behaviour model for embedded security research.
  *
  *	- Internal state machines per activity (non-blocking)
  *	- Randomised timing using RP2350 TRNG-seeded PRNG (pico_rand)

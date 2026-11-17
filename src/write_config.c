@@ -1,5 +1,5 @@
 /*
- *  Host-side tool to write the run time or Wi-Fi credentials as a UF2 file
+ *  Host-side tool to write firmware settings and protected input records as UF2
  *  directly to the RP2350 BOOTSEL mount point.
  *
  * CONFIG LAYOUT IN FLASH (last 4KB sector, offset 0x3FF000):
@@ -7,10 +7,10 @@
  *   [4..7]   hours    = N           (little-endian u32)
  *   [8..11]  period_s = N           (little-endian u32, re-activation gap)
  *
- * CREDENTIALS LAYOUT IN FLASH (sector before it, offset 0x3FE000):
+ * WI-FI SETTINGS LAYOUT IN FLASH (sector before it, offset 0x3FE000):
  *   encrypted secure_record_t, carrying a wifi_creds_t payload.
  *
- * LOGIN LAYOUT IN FLASH (sector before that, offset 0x3FD000):
+ * INPUT SEQUENCE LAYOUT IN FLASH (sector before that, offset 0x3FD000):
  *   encrypted secure_record_t, carrying a login_creds_t payload.
  */
 
@@ -137,7 +137,7 @@ static int write_uf2(uint32_t addr, const void *payload, size_t len)
     return 0;
 }
 
-/* Hidden standard input keeps credential and command text out of shell history,
+/* Hidden standard input keeps stored sequence text out of shell history,
  * argv and the terminal display. */
 static int read_hidden_line(char *buf, size_t size, const char *prompt)
 {
@@ -600,7 +600,7 @@ static int clear_login(void)
 
     if (write_uf2(LOGIN_CREDS_FLASH_ADDR, blank, sizeof(blank)) != 0)
         return 1;
-    printf("Login cleared\n");
+    printf("Stored input sequence cleared\n");
     return 0;
 }
 
