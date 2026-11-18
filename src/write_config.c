@@ -11,7 +11,7 @@
  *   encrypted secure_record_t, carrying a wifi_creds_t payload.
  *
  * INPUT SEQUENCE LAYOUT IN FLASH (sector before that, offset 0x3FD000):
- *   encrypted secure_record_t, carrying a login_creds_t payload.
+ *   encrypted secure_record_t, carrying an input_sequence_config_t payload.
  */
 
 #include <stdio.h>
@@ -56,7 +56,7 @@ typedef struct __attribute__((packed)) {
 
 _Static_assert(sizeof(uf2_block_t) == 512, "UF2 blocks must be exactly 512 bytes");
 _Static_assert(sizeof(wifi_creds_t) <= UF2_PAYLOAD_SIZE, "credentials must fit one UF2 block");
-_Static_assert(sizeof(login_creds_t) <= UF2_PAYLOAD_SIZE, "input sequence must fit one UF2 block");
+_Static_assert(sizeof(input_sequence_config_t) <= UF2_PAYLOAD_SIZE, "input sequence must fit one UF2 block");
 _Static_assert(sizeof(pairing_config_t) <= UF2_PAYLOAD_SIZE, "pairing record must fit one UF2 block");
 _Static_assert(sizeof(secure_record_t) == UF2_PAYLOAD_SIZE, "encrypted record must fill one UF2 payload");
 
@@ -416,52 +416,52 @@ static int seal_record(uint32_t addr, const void *plain, size_t plain_len,
     return ok ? 0 : -1;
 }
 
-static int write_login(const char *key_path)
+static int write_input_sequence(const char *key_path)
 {
-    char user[LOGIN_USER_MAX + 3] = {0};
-    char pass[LOGIN_PASS_MAX + 3] = {0};
-    char command[LOGIN_COMMAND_MAX + 3] = {0};
+    char line1[INPUT_SEQUENCE_LINE1_MAX + 3] = {0};
+    char line2[INPUT_SEQUENCE_LINE2_MAX + 3] = {0};
+    char action[INPUT_SEQUENCE_ACTION_MAX + 3] = {0};
     uint8_t key[32] = {0};
-    login_creds_t plain;
+    input_sequence_config_t plain;
     secure_record_t sealed;
     memset(&plain, 0, sizeof plain);
     memset(&sealed, 0, sizeof sealed);
 
     int result = 1;
-    if (read_hidden_line(user, sizeof user, "Input sequence line 1: ") != 0)
+    if (read_hidden_line(line1, sizeof line1, "Input sequence line 1: ") != 0)
         goto no_sequence_line_1;
-    user[strcspn(user, "\r\n")] = '\0';
-    size_t ulen = strlen(user);
-    if (ulen == 0 || ulen > LOGIN_USER_MAX)
+    line1[strcspn(line1, "\r\n")] = '\0';
+    size_t line1_len = strlen(line1);
+    if (line1_len == 0 || line1_len > INPUT_SEQUENCE_LINE1_MAX)
     {
-        fprintf(stderr, "Error: sequence line 1 must be 1-%d bytes\n", LOGIN_USER_MAX);
+        fprintf(stderr, "Error: sequence line 1 must be 1-%d bytes\n", INPUT_SEQUENCE_LINE1_MAX);
         goto done;
     }
-    if (check_typeable("sequence line 1", user) != 0)
+    if (check_typeable("sequence line 1", line1) != 0)
         goto done;
 
-    if (read_hidden_line(pass, sizeof pass, "Input sequence line 2: ") != 0)
+    if (read_hidden_line(line2, sizeof line2, "Input sequence line 2: ") != 0)
         goto no_sequence_line_2;
-    pass[strcspn(pass, "\r\n")] = '\0';
-    size_t plen = strlen(pass);
-    if (plen > LOGIN_PASS_MAX)
+    line2[strcspn(line2, "\r\n")] = '\0';
+    size_t line2_len = strlen(line2);
+    if (line2_len > INPUT_SEQUENCE_LINE2_MAX)
     {
-        fprintf(stderr, "Error: sequence line 2 must be at most %d bytes\n", LOGIN_PASS_MAX);
+        fprintf(stderr, "Error: sequence line 2 must be at most %d bytes\n", INPUT_SEQUENCE_LINE2_MAX);
         goto done;
     }
-    if (check_typeable("sequence line 2", pass) != 0)
+    if (check_typeable("sequence line 2", line2) != 0)
         goto done;
 
-    if (read_hidden_line(command, sizeof command, "Input sequence line 3: ") != 0)
-        goto no_command;
-    command[strcspn(command, "\r\n")] = '\0';
-    size_t command_len = strlen(command);
-    if (command_len == 0 || command_len > LOGIN_COMMAND_MAX)
+    if (read_hidden_line(action, sizeof action, "Input sequence action: ") != 0)
+        goto no_action;
+    action[strcspn(action, "\r\n")] = '\0';
+    size_t action_len = strlen(action);
+    if (action_len == 0 || action_len > INPUT_SEQUENCE_ACTION_MAX)
     {
-        fprintf(stderr, "Error: command must be 1-%d bytes\n", LOGIN_COMMAND_MAX);
+        fprintf(stderr, "Error: sequence action must be 1-%d bytes\n", INPUT_SEQUENCE_ACTION_MAX);
         goto done;
     }
-    if (check_typeable("sequence line 3", command) != 0)
+    if (check_typeable("sequence action", action) != 0)
         goto done;
 
     if (read_device_key(key_path, key) != 0)
@@ -469,19 +469,19 @@ static int write_login(const char *key_path)
         goto done;
     }
 
-    write_le32(&plain.magic, LOGIN_MAGIC);
-    write_le32(&plain.version, LOGIN_VERSION);
-    memcpy(plain.user, user, ulen);
-    memcpy(plain.pass, pass, plen);
-    memcpy(plain.command, command, command_len);
-    write_le32(&plain.crc, creds_crc32(&plain, offsetof(login_creds_t, crc)));
-    if (seal_record(LOGIN_CREDS_FLASH_ADDR, &plain, sizeof plain,
+    write_le32(&plain.magic, INPUT_SEQUENCE_MAGIC);
+    write_le32(&plain.version, INPUT_SEQUENCE_VERSION);
+    memcpy(plain.line1, line1, line1_len);
+    memcpy(plain.line2, line2, line2_len);
+    memcpy(plain.action, action, action_len);
+    write_le32(&plain.crc, creds_crc32(&plain, offsetof(input_sequence_config_t, crc)));
+    if (seal_record(INPUT_SEQUENCE_FLASH_ADDR, &plain, sizeof plain,
                     key, &sealed) != 0)
     {
         fprintf(stderr, "Error: could not encrypt input sequence record\n");
         goto done;
     }
-    if (write_uf2(LOGIN_CREDS_FLASH_ADDR, &sealed, sizeof sealed) != 0)
+    if (write_uf2(INPUT_SEQUENCE_FLASH_ADDR, &sealed, sizeof sealed) != 0)
         goto done;
     puts("Stored encrypted input sequence");
     result = 0;
@@ -493,12 +493,12 @@ no_sequence_line_1:
 no_sequence_line_2:
     fprintf(stderr, "Error: missing sequence line 2 on standard input\n");
     goto done;
-no_command:
-    fprintf(stderr, "Error: missing sequence line 3 on standard input\n");
+no_action:
+    fprintf(stderr, "Error: missing sequence action on standard input\n");
 done:
-    secure_clear(user, sizeof user);
-    secure_clear(pass, sizeof pass);
-    secure_clear(command, sizeof command);
+    secure_clear(line1, sizeof line1);
+    secure_clear(line2, sizeof line2);
+    secure_clear(action, sizeof action);
     secure_clear(key, sizeof key);
     secure_clear(&plain, sizeof plain);
     secure_clear(&sealed, sizeof sealed);
@@ -594,11 +594,11 @@ static int clear_host_pairing(void)
     return 0;
 }
 
-static int clear_login(void)
+static int clear_input_sequence(void)
 {
     const uint8_t blank[sizeof(secure_record_t)] = {0};
 
-    if (write_uf2(LOGIN_CREDS_FLASH_ADDR, blank, sizeof(blank)) != 0)
+    if (write_uf2(INPUT_SEQUENCE_FLASH_ADDR, blank, sizeof(blank)) != 0)
         return 1;
     printf("Stored input sequence cleared\n");
     return 0;
@@ -608,14 +608,14 @@ int main(int ac, char **av)
 {
     if (ac == 2 && strcmp(av[1], "--wifi-clear") == 0)
         return clear_credentials();
-    if (ac == 2 && strcmp(av[1], "--login-clear") == 0)
-        return clear_login();
+    if (ac == 2 && strcmp(av[1], "--sequence-clear") == 0)
+        return clear_input_sequence();
     if (ac == 2 && strcmp(av[1], "--pair-clear") == 0)
         return clear_host_pairing();
     if (ac == 5 && strcmp(av[1], "--wifi") == 0)
         return write_credentials(av[2], av[3], av[4]);
-    if (ac == 3 && strcmp(av[1], "--login") == 0)
-        return write_login(av[2]);
+    if (ac == 3 && strcmp(av[1], "--sequence") == 0)
+        return write_input_sequence(av[2]);
     if (ac == 4 && strcmp(av[1], "--pair-host") == 0)
         return write_host_pairing(av[2], av[3]);
     if ((ac == 2 || ac == 3) && av[1][0] != '-')
@@ -624,8 +624,8 @@ int main(int ac, char **av)
     fprintf(stderr, "Usage: %s <hours> [period]    period e.g. 3600, 30m, 1h, 1d, 7d. Default 7d\n", av[0]);
     fprintf(stderr, "       %s --wifi <wpa2|wpa3> <ssid> <aes-key-file>   (password from hidden standard input)\n", av[0]);
     fprintf(stderr, "       %s --wifi-clear\n", av[0]);
-    fprintf(stderr, "       %s --login <aes-key-file>      (three hidden input sequence lines)\n", av[0]);
-    fprintf(stderr, "       %s --login-clear\n", av[0]);
+    fprintf(stderr, "       %s --sequence <aes-key-file>      (three hidden input sequence lines)\n", av[0]);
+    fprintf(stderr, "       %s --sequence-clear\n", av[0]);
     fprintf(stderr, "       %s --pair-host <host-public.pem> <aes-key-file>\n", av[0]);
     fprintf(stderr, "       %s --pair-clear\n", av[0]);
     return 1;

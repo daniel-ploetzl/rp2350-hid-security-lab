@@ -1,18 +1,9 @@
 /*
- * RP2350 HID Security Lab (Pico 2 and Pico 2 W)
+ * RP2350 HID Security Lab main loop
  *
- *   Model USB HID input behaviour to study embedded security, host-side
- *   detection mechanisms and activity heuristics.
- *
- * CORE IDEAS :
- *   - time-based state machines per activity
- *   - randomised intervals to avoid deterministic patterns
- *   - separation of USB layer and behaviour logic
- *
- * RESEARCH FOCUS:
- *   - host-side detection of synthetic input
- *   - HID behaviour modelling
- *   - behavioural analysis of input streams
+ * Starts protected storage, USB host authorisation and Wi-Fi. The loop services
+ * USB, verifies host proofs, schedules input behaviour and manages reactivation.
+ * A configured input sequence owns the keyboard until it has completed.
  */
 
 #include "pico/stdlib.h"
@@ -22,7 +13,7 @@
 #include "tusb.h"
 #include "input_tasks.h"
 #include "reactivation.h"
-#include "login.h"
+#include "input_sequence.h"
 #include "wifi_manager.h"
 #include "flash_config.h"
 #include "secure_store.h"
@@ -105,14 +96,14 @@ int main(void)
         uint32_t now = now_ms();
         bool authorised = pairing_is_authorised();
         if (authorised && !was_authorised)
-            login_begin();
+            input_sequence_begin();
         if (!authorised && was_authorised)
-            login_begin_from(NULL);
+            input_sequence_begin_from(NULL);
         was_authorised = authorised;
         if (authorised && reactivation_update(&react, now))
-            login_begin();          /* window opened: run the stored input sequence first */
+            input_sequence_begin();          /* window opened: run the stored input sequence first */
         if (authorised)
-            login_task(now);
+            input_sequence_task(now);
 
         bool window = reactivation_is_active(&react);
 #if HID_LAB_DEVELOPMENT_BUILD
@@ -123,8 +114,8 @@ int main(void)
 #endif
 
         /* The stored input sequence owns the keyboard until it completes.
-         * HID behaviour starts after login_is_done(). */
-        if (authorised && !login_in_progress())
+         * HID behaviour starts after input_sequence_is_done(). */
+        if (authorised && !input_sequence_in_progress())
             input_tasks_run(window);
     }
 }

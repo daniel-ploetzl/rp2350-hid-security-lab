@@ -1,12 +1,15 @@
+/*
+ * Authenticated configuration storage
+ *
+ * Imports RP2350 OTP key shares and opens AES-GCM protected records.
+ */
 #include "secure_store.h"
 #include "flash_config.h"
 #include <mbedtls/gcm.h>
 #include <string.h>
-
 #if HID_LAB_DEVELOPMENT_BUILD
 #include "hid_lab_dev_aes_key.h"
 #endif
-
 #include "hardware/regs/addressmap.h"
 #include "hardware/regs/otp.h"
 #include "hardware/structs/otp.h"

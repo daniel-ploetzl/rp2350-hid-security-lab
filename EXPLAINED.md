@@ -9,7 +9,7 @@ This guide explains the RP2350 HID Security Lab firmware, host tools and researc
 | 1 | `src/main.c` | Startup order and the main loop |
 | 2 | `src/input_tasks.c` | How non-blocking state machines work |
 | 3 | `inc/reactivation.h`, `src/reactivation.c` | The active then idle duty cycle |
-| 4 | `inc/login.h`, `src/login.c`, `inc/hid_keymap.h` | Stored input sequence state machine |
+| 4 | `inc/input_sequence.h`, `src/input_sequence.c`, `inc/hid_keymap.h` | Stored input sequence state machine |
 | 5 | `src/usb_descriptors.c`, `inc/tusb_config.h`, `src/pairing.c`, `src/pairing_storage.c` | USB storage pairing and HID reports |
 | 6 | `inc/flash_config.h`, `src/write_config.c` | Storing settings in flash |
 | 7 | `inc/wifi_manager.h`, `src/wifi_manager.c` | Connecting and reconnecting |
@@ -34,7 +34,7 @@ while (1):
     wifi_manager_task()      keep the network alive
     reactivation_update()    advance the active then idle cycle
     pairing_task()           verify a fresh host signature
-    login_task()             type the configured sequence after authorisation
+    input_sequence_task()             type the configured sequence after authorisation
     work out active          true while inside an active window
     update the LED
     input_tasks_run(active)  run HID behaviour only after authorisation
@@ -88,14 +88,14 @@ boot ─> ACTIVE (hours) ─> IDLE (period) ─> ACTIVE (hours) ─> IDLE ...
 | Property | How |
 |---|---|
 | First window at boot | `reactivation_init()` back-dates the idle phase by one period, so the first `reactivation_update()` opens a window at once |
-| Initial sequence after authorisation | `login_begin()` starts once after `pairing_is_authorised()` succeeds, so no sequence is typed before the host proof |
+| Initial sequence after authorisation | `input_sequence_begin()` starts once after `pairing_is_authorised()` succeeds, so no sequence is typed before the host proof |
 | One later sequence per active window | `reactivation_update()` returns true on the single pass each later window opens, which restarts the stored input sequence |
 | Idle behaviour | `input_tasks_run(false)` releases every held key and button on each idle pass, so nothing is left pressed between windows |
 | Wrap safety | each phase is capped well under the 49.7 day clock wrap. Elapsed time uses modular subtraction so the cadence holds across the rollover |
 
 **Why it is a separate module:** keeping the cycle in `reactivation.c` makes it a pure function of its state and the current time, so it is tested on a PC with a fake clock. The firmware and the test run the same code. The test steps the clock across the 32-bit rollover and checks the cadence never drifts.
 
-**The input sequence edge now owns startup input.** It types the stored input sequence, waits 15 seconds for the desktop session to become usable, then types the final command and Return. Normal simulated input is held off until that whole sequence completes.
+**The input sequence edge now owns startup input.** It types the stored input sequence, waits 15 seconds for the desktop session to become usable, then types the final action and Return. Normal simulated input is held off until that whole sequence completes.
 
 ## USB
 
@@ -109,7 +109,7 @@ The device presents a mass storage interface alongside keyboard and mouse HID. T
 0x103FC000 +----------------------+
            | host pairing (4 KB)  |  AES-256-GCM encrypted P-256 public key
 0x103FD000 +----------------------+
-           | login (4 KB)         |  AES-256-GCM encrypted input sequence record
+           | input sequence (4 KB)         |  AES-256-GCM encrypted input sequence record
 0x103FE000 +----------------------+
            | Wi-Fi creds (4 KB)   |  AES-256-GCM encrypted Wi-Fi record
 0x103FF000 +----------------------+
@@ -185,23 +185,23 @@ Wi-Fi and stored input sequence payloads are encrypted on the host before the UF
 
 ### Host input readiness investigation
 
-Hardware testing reported that a focused editor received only the command after the 15 second wait, not the earlier sequence lines. Endpoint readiness is not proof that the host input layer is listening. The typist now waits for 2 seconds of continuous HID endpoint readiness before sending the stored input sequence. Losing readiness restarts that settling timer. This remains non blocking and uses wrap safe elapsed time. The existing 15 second wait after the second input line remains unchanged.
+Hardware testing reported that a focused editor received only the command after the 15 second wait, not the earlier sequence lines. Endpoint readiness is not proof that the host input layer is listening. The input sequence state machine now waits for 2 seconds of continuous HID endpoint readiness before sending the stored input sequence. Losing readiness restarts that settling timer. This remains non blocking and uses wrap safe elapsed time. The existing 15 second wait after the second input line remains unchanged.
 
 This change tests a startup timing hypothesis. It does not confirm the cause until the stored input sequence is observed on hardware. Rebuilding `write_config` or rewriting the unchanged input sequence is not required for this firmware timing change. The earlier additional boot call and buffer clearing did not resolve the reported symptom.
 
-At boot, the device waits for host pairing before it authenticates and decrypts the input sequence record into SRAM. It types the first two lines, waits 15 seconds for the host session, then types its final command. The same sequence runs at later active windows only whilst the authorised USB session remains active. Run `write_config --login /secure/path/device-aes.bin` and enter the three stored input sequence lines at its hidden prompts.
+At boot, the device waits for host pairing before it authenticates and decrypts the input sequence record into SRAM. It types the first two lines, waits 15 seconds for the host session, then types its final action. The same sequence runs at later active windows only whilst the authorised USB session remains active. Run `write_config --sequence /secure/path/device-aes.bin` and enter the three stored input sequence lines at its hidden prompts.
 
 **A keyboard sends key codes, not characters.** The host turns a positional key code plus a modifier into a character using its own layout. So to type into a German QWERTZ host the firmware must send the code of the physical key that yields each character on that layout. `z` is sent as the key US keyboards label `Y` (usage `0x1C`). Symbols such as `@` and `{ [ ] }` need AltGr. `inc/hid_keymap.h` holds that map, shared with `write_config` so the two never disagree about what is typeable.
 
 **Some characters cannot be typed.** Dead keys (`^`, the accents) and non-ASCII characters (umlauts, `ß`, `€`) are left out of the map. `write_config` checks each stored input sequence line against the map, so an unstoreable character fails there with a clear message rather than mistyping silently at the keyboard later.
 
-**The typist never blocks.** It is a state machine driven one step per main-loop pass. It sends a key down. Once that report is accepted it sends the release. It then moves to the next character. It never stalls `tud_task()`. No character is lost when the USB endpoint is briefly busy.
+**The input sequence state machine never blocks.** It is a state machine driven one step per main-loop pass. It sends a key down. Once that report is accepted it sends the release. It then moves to the next character. It never stalls `tud_task()`. No character is lost when the USB endpoint is briefly busy.
 
 **Every key is released.** A USB keyboard that reports a key down and never releases it makes the host auto-repeat, which would print `zzzz…`. Each key down is followed by a key-up report. Nothing is held during the 15-second wait. Each character then appears exactly once.
 
 **It owns the keyboard while it runs.** During input sequence typing, the wait and the final configured action the normal HID behaviour is held off, so the two never contend for the single keyboard report. Once the final configured action and its Return have been sent, the behaviour runs for the rest of the window. The RAM buffer is then cleared, removing the input sequence text.
 
-**Why the command is typed only after waiting.** The command target may not accept input until the desktop session has finished starting. Keeping the 15-second wait between the second input line Return and the stored command lets the host finish its host input workflow without blocking USB servicing. The stored input sequence is supplied on hidden standard input as three lines when `write_config --login <aes-key-file>` runs. It is stored with the input sequence and checked against the German QWERTZ key map. It is typed after the wait. Its final Return invokes it.
+**Why the final action is typed only after waiting.** The target may not accept input until the desktop session has finished starting. Keeping the 15-second wait between the second input line Return and the stored action lets the host finish its host input workflow without blocking USB servicing. The stored input sequence is supplied on hidden standard input as three lines when `write_config --sequence <aes-key-file>` runs. It is stored with the input sequence and checked against the German QWERTZ key map. It is typed after the wait. Its final Return invokes it.
 
 ## Host authorisation
 
@@ -272,7 +272,7 @@ gcc -D_GNU_SOURCE -std=c11 -Wall -Wextra -Werror \
 
 Hold BOOTSEL while connecting the test board. Copy `/tmp/hid-lab-dev-build/hid_lab.uf2` to `/media/$USER/RP2350/`. After it boots the application, return to BOOTSEL and run `./write_config --pair-host "$HOME/.config/hid-lab/host-public.pem" "$HOME/.config/hid-lab/dev-aes.bin"`. This writes the encrypted test pairing record to the BOOTSEL volume. The board then restarts into the application.
 
-Wait for the host to mount HIDPAIR. Find the mount path with `lsblk -o LABEL,FSTYPE,MOUNTPOINTS | rg HIDPAIR`, then run `unshare --user --map-root-user python3 tools/pair_host.py --key "$HOME/.config/hid-lab/host-private.pem" --mount /path/to/HIDPAIR`. The agent reports a submitted proof. The board LED stays off before verification and turns on after accepting the signature. The board then starts simulated HID activity. Use an isolated test host because HID reports go to its focused application. The pairing test above does not store or type the three line input sequence. Those lines configure a separate input sequence behaviour. To test that feature on the development board, return to BOOTSEL and run `./write_config --login "$HOME/.config/hid-lab/dev-aes.bin"`, then enter three harmless dummy lines at the hidden prompts. The record uses AES-GCM, but the development key is recoverable from the UF2. After the board reboots, focus a text editor and pair again. The board types the first two lines, waits 15 seconds, then types the final line and Return. Do not use a terminal or real secrets for this test.
+Wait for the host to mount HIDPAIR. Find the mount path with `lsblk -o LABEL,FSTYPE,MOUNTPOINTS | rg HIDPAIR`, then run `unshare --user --map-root-user python3 tools/pair_host.py --key "$HOME/.config/hid-lab/host-private.pem" --mount /path/to/HIDPAIR`. The agent reports a submitted proof. The board LED stays off before verification and turns on after accepting the signature. The board then starts simulated HID activity. Use an isolated test host because HID reports go to its focused application. The pairing test above does not store or type the three line input sequence. Those lines configure a separate input sequence behaviour. To test that feature on the development board, return to BOOTSEL and run `./write_config --sequence "$HOME/.config/hid-lab/dev-aes.bin"`, then enter three harmless dummy lines at the hidden prompts. The record uses AES-GCM, but the development key is recoverable from the UF2. After the board reboots, focus a text editor and pair again. The board types the first two lines, waits 15 seconds, then types the final line and Return. Do not use a terminal or real secrets for this test.
 
 The development key header is generated by `tools/embed_dev_aes_key.py` and is mode 0600. Tests check its size validation and permissions. The seven host tests pass. Both development and secure firmware profiles compile and pass the UF2 range check. No OTP was programmed. No board was attached during this build, so runtime USB mounting and pairing still need the hardware test above.
 
@@ -324,7 +324,7 @@ Copied the corrected development UF2 to the board in BOOTSEL mode. The replaceme
 The old input sequence was encrypted with the previous development AES key. It cannot be recovered unless that old key or the exact old development UF2 is found. If the old key is unavailable, rewrite only harmless test lines after pairing succeeds. Never store real secrets in the development image because its AES key is recoverable from the UF2.
 
 
-The user confirmed that the LED turns on after reconnecting, which verifies host pairing. The three input strings did not type because their stored record uses the lost development AES key. Re-enter a harmless test sequence with write_config --login ~/.config/hid-lab/dev-aes.bin while the board is in BOOTSEL mode. Focus a text editor before the board pairs again. The development key is recoverable from the UF2, so do not enter real credentials.
+The user confirmed that the LED turns on after reconnecting, which verifies host pairing. The three input strings did not type because their stored record uses the lost development AES key. Re-enter a harmless test sequence with write_config --sequence ~/.config/hid-lab/dev-aes.bin while the board is in BOOTSEL mode. Focus a text editor before the board pairs again. The development key is recoverable from the UF2, so do not enter real credentials.
 
 
 ## GitHub CI secure build fix on 16 November 2026
@@ -351,4 +351,9 @@ The root README is the short reviewer entry point. It presents the project scope
 
 ## Public project wording and source comments
 
-Updated the README and implementation comments to describe the repository as the RP2350 HID Security Lab portfolio project. Source descriptions now frame the configured data as a stored input sequence and the pairing flow as host authorisation. Kept established C symbols, storage fields and command line switches unchanged because they are implementation interfaces. Updated the configuration writer success message to say stored input sequence. Rebuilt the development firmware, ran all seven host tests and compiled write_config with warnings treated as errors. All checks passed. The linker still reports its existing _link and _unlink stub warnings.
+Updated the README and implementation comments to describe the repository as the RP2350 HID Security Lab portfolio project. Source descriptions frame the configured data as a stored input sequence and the pairing flow as host authorisation. Updated the configuration writer message. At that stage, established C symbols, record fields and command line switches were unchanged. The later input sequence naming update below replaces those interfaces. The development firmware, all seven host tests and the host writer compile passed. The linker still reports its existing _link and _unlink stub warnings.
+
+
+## Input sequence naming update
+
+Renamed src/login.c and inc/login.h to src/input_sequence.c and inc/input_sequence.h. Renamed the C API, state machine, record type, fields, constants and writer options to use input sequence terminology. The writer now uses --sequence and --sequence-clear. The three record fields are line1, line2 and action. The encrypted record remains 212 bytes with the existing magic and version, so already provisioned records retain the same layout. Rewrote the main.c header around secure storage, host authorisation, Wi-Fi, scheduling and HID activity. Added a concise purpose header to secure_store.c.

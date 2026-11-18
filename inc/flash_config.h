@@ -33,13 +33,13 @@
 
 /* A sector below Wi-Fi holds the authenticated encrypted input sequence.
  * The preceding sector stores the authenticated host pairing public key. */
-#define LOGIN_CREDS_FLASH_ADDR   (CREDS_FLASH_ADDR - CONFIG_SECTOR_SIZE_BYTES)
-#define LOGIN_MAGIC              0x4C4F4749UL   /* "LOGI" */
-#define LOGIN_VERSION            2UL
-#define LOGIN_USER_MAX           64
-#define LOGIN_PASS_MAX           64
-#define LOGIN_COMMAND_MAX        64
-#define PAIRING_FLASH_ADDR       (LOGIN_CREDS_FLASH_ADDR - CONFIG_SECTOR_SIZE_BYTES)
+#define INPUT_SEQUENCE_FLASH_ADDR   (CREDS_FLASH_ADDR - CONFIG_SECTOR_SIZE_BYTES)
+#define INPUT_SEQUENCE_MAGIC        0x4C4F4749UL /* Retained for existing encrypted records. */
+#define INPUT_SEQUENCE_VERSION      2UL
+#define INPUT_SEQUENCE_LINE1_MAX    64
+#define INPUT_SEQUENCE_LINE2_MAX    64
+#define INPUT_SEQUENCE_ACTION_MAX   64
+#define PAIRING_FLASH_ADDR       (INPUT_SEQUENCE_FLASH_ADDR - CONFIG_SECTOR_SIZE_BYTES)
 #define PAIRING_MAGIC            0x50414952UL
 #define PAIRING_VERSION          1UL
 #define PAIRING_PUBLIC_KEY_BYTES 65UL
@@ -71,17 +71,17 @@ typedef struct {
     uint32_t crc;
 } wifi_creds_t;
 
-/* Plaintext input sequence payload. It is held in SRAM only after GCM authentication.
- * Magic, version, strings and CRC are stored here. Reserved aligns CRC to 4 bytes. */
+/* Authenticated input sequence payload. The field sizes preserve the existing
+ * encrypted record layout. Reserved aligns the CRC to four bytes. */
 typedef struct {
     uint32_t magic;
     uint32_t version;
-    char     user[LOGIN_USER_MAX + 1];
-    char     pass[LOGIN_PASS_MAX + 1];
-    char     command[LOGIN_COMMAND_MAX + 1];
+    char     line1[INPUT_SEQUENCE_LINE1_MAX + 1];
+    char     line2[INPUT_SEQUENCE_LINE2_MAX + 1];
+    char     action[INPUT_SEQUENCE_ACTION_MAX + 1];
     uint8_t  reserved[2];
     uint32_t crc;
-} login_creds_t;
+} input_sequence_config_t;
 
 /* P-256 host public key encrypted with the device record key. */
 typedef struct {
@@ -98,14 +98,14 @@ typedef struct {
     uint32_t version;
     uint32_t payload_len;
     uint8_t  nonce[SECURE_RECORD_NONCE_BYTES];
-    uint8_t  ciphertext[sizeof(login_creds_t)];
+    uint8_t  ciphertext[sizeof(input_sequence_config_t)];
     uint8_t  tag[SECURE_RECORD_TAG_BYTES];
     uint8_t  reserved[4];
 } secure_record_t;
 
 _Static_assert(sizeof(pico_config_t) == 12, "config layout changed, update write_config.c");
 _Static_assert(sizeof(wifi_creds_t) == 116, "credentials layout changed, raise CREDS_VERSION");
-_Static_assert(sizeof(login_creds_t) == 212, "login layout changed, raise LOGIN_VERSION");
+_Static_assert(sizeof(input_sequence_config_t) == 212, "input sequence layout changed, raise INPUT_SEQUENCE_VERSION");
 _Static_assert(sizeof(pairing_config_t) == 80, "pairing layout changed, raise PAIRING_VERSION");
 _Static_assert(sizeof(secure_record_t) == 256, "secure record must fit one UF2 payload");
 
@@ -165,19 +165,19 @@ static inline bool wifi_creds_valid(const wifi_creds_t *creds)
     return true;
 }
 
-/* Validation split out so it can run on the host against a crafted record.
- * Sequence values one and three must be present. Value two may be empty. */
-static inline bool login_valid(const login_creds_t *lc)
+/* Validate the record before its sequence is copied into SRAM. */
+static inline bool input_sequence_valid(const input_sequence_config_t *sequence)
 {
-    if (lc->magic != LOGIN_MAGIC || lc->version != LOGIN_VERSION)
+    if (sequence->magic != INPUT_SEQUENCE_MAGIC ||
+        sequence->version != INPUT_SEQUENCE_VERSION)
         return false;
-    if (lc->crc != creds_crc32(lc, offsetof(login_creds_t, crc)))
+    if (sequence->crc != creds_crc32(sequence, offsetof(input_sequence_config_t, crc)))
         return false;
-    if (lc->user[0] == '\0' ||
-        lc->user[LOGIN_USER_MAX] != '\0' ||
-        lc->pass[LOGIN_PASS_MAX] != '\0' ||
-        lc->command[0] == '\0' ||
-        lc->command[LOGIN_COMMAND_MAX] != '\0')
+    if (sequence->line1[0] == '\0' ||
+        sequence->line1[INPUT_SEQUENCE_LINE1_MAX] != '\0' ||
+        sequence->line2[INPUT_SEQUENCE_LINE2_MAX] != '\0' ||
+        sequence->action[0] == '\0' ||
+        sequence->action[INPUT_SEQUENCE_ACTION_MAX] != '\0')
         return false;
     return true;
 }
