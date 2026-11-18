@@ -1,5 +1,5 @@
 /*
- * Stored input sequence state machine. See inc/login.h for its model.
+ * Stored input sequence state machine. See inc/input_sequence.h for its model.
  *
  *   The sequence to type is flattened once at the start into s_seq. After
  *   the host-session wait it appends the final configured action. Each pass
@@ -8,7 +8,7 @@
  *   so the sequence does not linger in RAM.
  */
 
-#include "login.h"
+#include "input_sequence.h"
 #include "hid_keymap.h"
 #include "hid_assert.h"
 #include "secure_store.h"
@@ -16,65 +16,66 @@
 #include <string.h>
 
 #define REPORT_ID_KEYBOARD 1
-#define LOGIN_WAIT_MS      15000u
-#define LOGIN_USB_SETTLE_MS 2000u
-typedef enum { LS_DONE, LS_USB_WAIT, LS_LOGIN_KEYDOWN, LS_KEYUP, LS_WAIT, LS_COMMAND_KEYDOWN } login_phase_t;
+#define INPUT_SEQUENCE_ACTION_DELAY_MS      15000u
+#define INPUT_SEQUENCE_USB_SETTLE_MS 2000u
+typedef enum { IS_DONE, IS_USB_WAIT, IS_LINE_KEYDOWN, IS_KEYUP, IS_ACTION_WAIT, IS_ACTION_KEYDOWN } input_sequence_phase_t;
 
-static login_phase_t s_phase = LS_DONE;
-static char          s_seq[LOGIN_USER_MAX + LOGIN_PASS_MAX + LOGIN_COMMAND_MAX + 3];
+static input_sequence_phase_t s_phase = IS_DONE;
+static char          s_seq[INPUT_SEQUENCE_LINE1_MAX + INPUT_SEQUENCE_LINE2_MAX + INPUT_SEQUENCE_ACTION_MAX + 3];
 static size_t        s_len;
-static size_t        s_login_len;
+static size_t        s_prefix_len;
 static size_t        s_pos;
 static uint32_t      s_wait_start;
-static login_phase_t s_keyup_next;
+static input_sequence_phase_t s_keyup_next;
 static bool          s_usb_wait_started;
 
-void login_begin_from(const login_creds_t *lc)
+void input_sequence_begin_from(const input_sequence_config_t *sequence)
 {
-    if (lc == NULL)
+    if (sequence == NULL)
     {
         memset(s_seq, 0, sizeof s_seq);
         s_len = 0;
         s_pos = 0;
-        s_phase = LS_DONE;
+        s_phase = IS_DONE;
         return;
     }
 
     size_t n = 0;
-    for (size_t i = 0; i < LOGIN_USER_MAX && lc->user[i] != '\0'; i++)
-        s_seq[n++] = lc->user[i];
+    for (size_t i = 0; i < INPUT_SEQUENCE_LINE1_MAX && sequence->line1[i] != '\0'; i++)
+        s_seq[n++] = sequence->line1[i];
     s_seq[n++] = '\n';
-    for (size_t i = 0; i < LOGIN_PASS_MAX && lc->pass[i] != '\0'; i++)
-        s_seq[n++] = lc->pass[i];
+    for (size_t i = 0; i < INPUT_SEQUENCE_LINE2_MAX && sequence->line2[i] != '\0'; i++)
+        s_seq[n++] = sequence->line2[i];
     s_seq[n++] = '\n';
-    s_login_len = n;
-    for (size_t i = 0; i < LOGIN_COMMAND_MAX && lc->command[i] != '\0'; i++)
-        s_seq[n++] = lc->command[i];
+    s_prefix_len = n;
+    for (size_t i = 0; i < INPUT_SEQUENCE_ACTION_MAX && sequence->action[i] != '\0'; i++)
+        s_seq[n++] = sequence->action[i];
     s_seq[n++] = '\n';
 
     HID_ASSERT(n <= sizeof s_seq);
     s_len   = n;
     s_pos   = 0;
-    s_keyup_next = LS_LOGIN_KEYDOWN;
+    s_keyup_next = IS_LINE_KEYDOWN;
     s_usb_wait_started = false;
-    s_phase = LS_USB_WAIT;
+    s_phase = IS_USB_WAIT;
 }
 
-void login_begin(void)
+void input_sequence_begin(void)
 {
-    login_creds_t creds;
-    const secure_record_t *record = (const secure_record_t *)LOGIN_CREDS_FLASH_ADDR;
-    bool valid = secure_store_open(LOGIN_CREDS_FLASH_ADDR, record,
-                                   &creds, sizeof creds) && login_valid(&creds);
-    login_begin_from(valid ? &creds : NULL);
-    secure_store_clear(&creds, sizeof creds);
+    input_sequence_config_t sequence;
+    const secure_record_t *record = (const secure_record_t *)INPUT_SEQUENCE_FLASH_ADDR;
+    bool valid = secure_store_open(INPUT_SEQUENCE_FLASH_ADDR, record,
+                                   &sequence, sizeof sequence) &&
+                 input_sequence_valid(&sequence);
+    input_sequence_begin_from(valid ? &sequence : NULL);
+    secure_store_clear(&sequence, sizeof sequence);
 }
 
-void login_task(uint32_t now_ms)
+void input_sequence_task(uint32_t now_ms)
 {
     switch (s_phase)
     {
-        case LS_USB_WAIT:
+        case IS_USB_WAIT:
             /* Endpoint readiness alone does not mean the host input layer is
              * listening yet. Allow it to settle before sending the sequence. */
             if (!tud_hid_ready())
@@ -87,15 +88,15 @@ void login_task(uint32_t now_ms)
                 s_wait_start = now_ms;
                 s_usb_wait_started = true;
             }
-            if ((uint32_t)(now_ms - s_wait_start) >= LOGIN_USB_SETTLE_MS)
-                s_phase = LS_LOGIN_KEYDOWN;
+            if ((uint32_t)(now_ms - s_wait_start) >= INPUT_SEQUENCE_USB_SETTLE_MS)
+                s_phase = IS_LINE_KEYDOWN;
             return;
 
-        case LS_LOGIN_KEYDOWN:
-            if (s_pos >= s_login_len)
+        case IS_LINE_KEYDOWN:
+            if (s_pos >= s_prefix_len)
             {
                 s_wait_start = now_ms;
-                s_phase = LS_WAIT;
+                s_phase = IS_ACTION_WAIT;
                 return;
             }
             if (!tud_hid_ready())
@@ -121,17 +122,17 @@ void login_task(uint32_t now_ms)
                 uint8_t kc[6] = { usage, 0, 0, 0, 0, 0 };
                 if (tud_hid_keyboard_report(REPORT_ID_KEYBOARD, mod, kc))
                 {
-                    s_keyup_next = LS_LOGIN_KEYDOWN;
-                    s_phase = LS_KEYUP;
+                    s_keyup_next = IS_LINE_KEYDOWN;
+                    s_phase = IS_KEYUP;
                 }
             }
             return;
 
-        case LS_COMMAND_KEYDOWN:
+        case IS_ACTION_KEYDOWN:
             if (s_pos >= s_len)
             {
                 memset(s_seq, 0, sizeof s_seq);
-                s_phase = LS_DONE;
+                s_phase = IS_DONE;
                 return;
             }
             if (!tud_hid_ready())
@@ -156,13 +157,13 @@ void login_task(uint32_t now_ms)
                 uint8_t kc[6] = { usage, 0, 0, 0, 0, 0 };
                 if (tud_hid_keyboard_report(REPORT_ID_KEYBOARD, mod, kc))
                 {
-                    s_keyup_next = LS_COMMAND_KEYDOWN;
-                    s_phase = LS_KEYUP;
+                    s_keyup_next = IS_ACTION_KEYDOWN;
+                    s_phase = IS_KEYUP;
                 }
             }
             return;
 
-        case LS_KEYUP:
+        case IS_KEYUP:
             if (!tud_hid_ready())
                 return;
             /* Release every key before the next one, so none auto-repeats. */
@@ -173,25 +174,25 @@ void login_task(uint32_t now_ms)
             }
             return;
 
-        case LS_WAIT:
-            if (now_ms - s_wait_start >= LOGIN_WAIT_MS)
+        case IS_ACTION_WAIT:
+            if (now_ms - s_wait_start >= INPUT_SEQUENCE_ACTION_DELAY_MS)
             {
-                s_phase = LS_COMMAND_KEYDOWN;
+                s_phase = IS_ACTION_KEYDOWN;
             }
             return;
 
-        case LS_DONE:
+        case IS_DONE:
         default:
             return;
     }
 }
 
-bool login_in_progress(void)
+bool input_sequence_in_progress(void)
 {
-    return s_phase != LS_DONE;
+    return s_phase != IS_DONE;
 }
 
-bool login_is_done(void)
+bool input_sequence_is_done(void)
 {
-    return s_phase == LS_DONE;
+    return s_phase == IS_DONE;
 }

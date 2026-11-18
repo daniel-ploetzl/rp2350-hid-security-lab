@@ -35,7 +35,7 @@ else()
     endforeach()
 endif()
 
-# Reserve the last four 4KB sectors for encrypted host pairing, login, Wi-Fi
+# Reserve the last four 4KB sectors for encrypted host pairing, input sequence, Wi-Fi
 # and runtime config. Secure code is linked for SRAM and the packaged UF2 is checked.
 # Keep the linker variable distinct from the board's true flash-size macro.
 set(PICO_FLASH_SIZE_BYTES 0x003FC000)
@@ -79,7 +79,7 @@ add_executable(hid_lab
     src/main.c
 	src/input_tasks.c
     src/reactivation.c
-    src/login.c
+    src/input_sequence.c
     src/secure_store.c
     src/pairing.c
     src/pairing_storage.c

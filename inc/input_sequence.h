@@ -10,8 +10,8 @@
  *   sees each character exactly once with no auto-repeat.
  */
 
-#ifndef LOGIN_H
-#define LOGIN_H
+#ifndef INPUT_SEQUENCE_H
+#define INPUT_SEQUENCE_H
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -19,19 +19,19 @@
 
 /* Authenticates and decrypts the stored record into short-lived SRAM, then
  * starts the sequence. Invalid or absent records mean nothing is typed. */
-void login_begin(void);
+void input_sequence_begin(void);
 
 /* Accepts a record directly so the sequence can be tested without reading
  * from the fixed flash address. */
-void login_begin_from(const login_creds_t *lc);
+void input_sequence_begin_from(const input_sequence_config_t *sequence);
 
 /* Advances the sequence. Call every main-loop pass with the monotonic time. */
-void login_task(uint32_t now_ms);
+void input_sequence_task(uint32_t now_ms);
 
 /* True while the stored sequence owns the keyboard. */
-bool login_in_progress(void);
+bool input_sequence_in_progress(void);
 
 /* True once the sequence and the wait have finished. */
-bool login_is_done(void);
+bool input_sequence_is_done(void);
 
 #endif
