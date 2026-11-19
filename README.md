@@ -10,7 +10,7 @@ This portfolio project demonstrates RP2350 firmware engineering through USB HID 
 - Composite USB HID with keyboard, mouse and a RAM-backed pairing volume
 - Fresh challenge and signature based host authorisation before HID reports are released
 - AES-GCM encrypted configuration records and RP2350 secure boot and OTP integration
-- C firmware and configuration writer, with Python host utilities and tests
+- C firmware, configuration writer, host utilities and firmware pairing tests
 
 ## Security boundary
 
@@ -18,7 +18,7 @@ Host authorisation gates simulated HID reports on proof of possession of an enro
 
 ## Build and test
 
-The firmware requires the Raspberry Pi Pico SDK with RP2350 support, CMake and the ARM GCC toolchain. Secure builds also require protected signing, AES and IV key files. See [EXPLAINED.md](EXPLAINED.md) for key handling, development pairing, provisioning limits and host setup.
+The firmware requires the Raspberry Pi Pico SDK with RP2350 support, CMake and the ARM GCC toolchain. Secure builds also require protected signing, AES and IV key files. Host tools require a C compiler and OpenSSL. Project code and tests are written in C and Bash. The Pico SDK uses Python internally for its build support. See [EXPLAINED.md](EXPLAINED.md) for key handling, development pairing, provisioning limits and host setup.
 
 ```sh
 cmake -S . -B build \
@@ -26,16 +26,16 @@ cmake -S . -B build \
   -DHID_LAB_AES_KEY=/secure/path/device-aes.bin \
   -DHID_LAB_IV_SALT=/secure/path/device-iv.bin
 cmake --build build -j2
-python3 -m unittest discover -s tests -v
+bash tests/run_tests.sh
 ```
 
-The Python tests use temporary files. They do not access a board or program OTP. CI firmware artifacts use disposable keys and are for build verification only.
+The host suite compiles the firmware pairing module against the Pico SDK's Mbed TLS sources and stubs USB, OTP storage and board identity. It exercises rejection and acceptance paths without hardware or OTP programming. CI firmware artifacts use disposable keys and are for build verification only.
 
 ## Repository map
 
 - `src/` firmware and the C configuration writer
 - `inc/` firmware interfaces and configuration definitions
-- `tools/` build helpers and the Linux pairing agent
+- `tools/` C build helpers and the Linux pairing agent
 - `systemd/user/` optional rootless host pairing timer
 - `tests/` host-side tests
 
