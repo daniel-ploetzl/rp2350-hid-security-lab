@@ -46,18 +46,33 @@ if(NOT PICO_PLATFORM STREQUAL "rp2350-arm-s")
     message(FATAL_ERROR "supported profiles require RP2350 Cortex-M33 Secure platform, got ${PICO_PLATFORM}")
 endif()
 
-find_package(Python3 COMPONENTS Interpreter REQUIRED)
+find_program(HID_LAB_HOST_CC NAMES cc gcc)
+if(NOT HID_LAB_HOST_CC)
+    message(FATAL_ERROR "A host C compiler is required to build project tools")
+endif()
+set(HID_LAB_HOST_TOOLS_DIR "${CMAKE_CURRENT_BINARY_DIR}/host-tools")
+set(HID_LAB_BUILD_TOOLS "${HID_LAB_HOST_TOOLS_DIR}/hid_lab_build_tools")
+file(MAKE_DIRECTORY "${HID_LAB_HOST_TOOLS_DIR}")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/tools/build_tools.c")
+execute_process(
+    COMMAND ${HID_LAB_HOST_CC} -std=c11 -Wall -Wextra -Werror
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/build_tools.c"
+            -o "${HID_LAB_BUILD_TOOLS}"
+    RESULT_VARIABLE HID_LAB_HOST_TOOLS_RESULT
+)
+if(NOT HID_LAB_HOST_TOOLS_RESULT EQUAL 0)
+    message(FATAL_ERROR "Could not compile the C host build tools")
+endif()
 if(HID_LAB_DEVELOPMENT_BUILD)
     set(HID_LAB_DEV_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
     set(HID_LAB_DEV_KEY_HEADER "${HID_LAB_DEV_GENERATED_DIR}/hid_lab_dev_aes_key.h")
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
         "${HID_LAB_DEV_AES_KEY}"
-        "${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_dev_aes_key.py"
-        "${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_dev_aes_key.py")
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/build_tools.c")
     file(MAKE_DIRECTORY "${HID_LAB_DEV_GENERATED_DIR}")
     execute_process(
-        COMMAND ${Python3_EXECUTABLE}
-                ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_dev_aes_key.py
+        COMMAND ${HID_LAB_BUILD_TOOLS} embed-key
                 ${HID_LAB_DEV_AES_KEY} ${HID_LAB_DEV_KEY_HEADER}
         RESULT_VARIABLE HID_LAB_DEV_KEY_RESULT
     )
@@ -65,8 +80,7 @@ if(HID_LAB_DEVELOPMENT_BUILD)
         message(FATAL_ERROR "Could not create the development key header")
     endif()
     execute_process(
-        COMMAND ${Python3_EXECUTABLE}
-                ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_dev_aes_key.py
+        COMMAND ${HID_LAB_BUILD_TOOLS} verify-key
                 ${HID_LAB_DEV_AES_KEY} ${HID_LAB_DEV_KEY_HEADER}
         RESULT_VARIABLE HID_LAB_DEV_KEY_CHECK_RESULT
     )
@@ -141,23 +155,20 @@ endif()
 pico_add_extra_outputs(hid_lab)
 if(HID_LAB_DEVELOPMENT_BUILD)
     add_custom_command(TARGET hid_lab POST_BUILD
-        COMMAND ${Python3_EXECUTABLE}
-                ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_firmware_uf2.py
+        COMMAND ${HID_LAB_BUILD_TOOLS} verify-uf2
                 ${CMAKE_CURRENT_BINARY_DIR}/hid_lab.uf2
         COMMENT "Checking development UF2 stays below reserved settings sectors"
         VERBATIM
     )
 else()
     add_custom_command(TARGET hid_lab POST_BUILD
-        COMMAND ${Python3_EXECUTABLE}
-                ${CMAKE_CURRENT_SOURCE_DIR}/tools/extend_otp_for_credentials.py
+        COMMAND ${HID_LAB_BUILD_TOOLS} extend-otp
                 ${CMAKE_CURRENT_BINARY_DIR}/hid_lab.otp.json
         COMMENT "Adding Secure-only credential key shares to the OTP provisioning file"
         VERBATIM
     )
     add_custom_command(TARGET hid_lab POST_BUILD
-        COMMAND ${Python3_EXECUTABLE}
-                ${CMAKE_CURRENT_SOURCE_DIR}/tools/verify_firmware_uf2.py
+        COMMAND ${HID_LAB_BUILD_TOOLS} verify-uf2
                 ${CMAKE_CURRENT_BINARY_DIR}/hid_lab.uf2
         COMMENT "Checking encrypted firmware UF2 stays below the reserved credential sectors"
         VERBATIM

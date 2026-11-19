@@ -51,6 +51,10 @@ jobs:
       - name: Build host tool
         run: gcc -D_GNU_SOURCE -std=c11 -Wall -Wextra -Werror src/write_config.c -Iinc -lcrypto -o write_config
 
+      - name: Run host and firmware pairing tests
+        if: matrix.board == 'pico2_w'
+        run: bash tests/run_tests.sh
+
       - name: Write checksum
         working-directory: build-${{ matrix.board }}
         run: sha256sum hid_lab.uf2 > hid_lab.uf2.sha256
