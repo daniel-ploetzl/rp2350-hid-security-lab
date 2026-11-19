@@ -27,7 +27,7 @@
 #define JSON_TOKENS_MAX 8192u
 #define JSON_DEPTH_MAX 32u
 #define JSON_EDITS_MAX 32u
-#define JSON_EDIT_TEXT_MAX 512u
+#define JSON_EDIT_TEXT_MAX 4096u
 
 typedef enum { JSON_OBJECT, JSON_ARRAY, JSON_STRING, JSON_ATOM } json_type_t;
 typedef struct {
@@ -40,6 +40,7 @@ typedef struct {
 typedef struct {
     size_t start;
     size_t end;
+    size_t order;
     size_t text_len;
     char text[JSON_EDIT_TEXT_MAX];
 } json_edit_t;
@@ -473,6 +474,7 @@ static bool json_add_edit(size_t start, size_t end, const char *text)
     json_edit_t *edit = &s_edits[s_edit_count++];
     edit->start = start;
     edit->end = end;
+    edit->order = s_edit_count;
     edit->text_len = length;
     memcpy(edit->text, text, length);
     return true;
@@ -495,27 +497,26 @@ static bool json_set_property(size_t object, const char *key, const char *value,
     char insertion[JSON_EDIT_TEXT_MAX];
     bool has_children = s_tokens[object].first_child != SIZE_MAX;
     size_t insertion_position = s_tokens[object].end - 1u;
+    bool has_insertions = false;
     for (size_t index = 0u; index < s_edit_count; index++)
     {
         if (s_edits[index].start == insertion_position &&
             s_edits[index].end == insertion_position)
-        {
-            size_t previous_length = s_edits[index].text_len;
-            int appended = snprintf(s_edits[index].text + previous_length,
-                                    sizeof s_edits[index].text - previous_length,
-                                    ", \"%s\":%s", key, value);
-            if (appended < 0 || (size_t)appended >=
-                sizeof s_edits[index].text - previous_length)
-                return false;
-            s_edits[index].text_len += (size_t)appended;
-            return true;
-        }
+            has_insertions = true;
     }
     int written = snprintf(insertion, sizeof insertion, "%s\"%s\":%s",
-                           has_children ? ", " : "", key, value);
+                           has_children || has_insertions ? ", " : "", key, value);
     if (written < 0 || (size_t)written >= sizeof insertion)
+    {
+        print_error("OTP property exceeds the edit buffer");
         return false;
-    return json_add_edit(insertion_position, insertion_position, insertion);
+    }
+    if (!json_add_edit(insertion_position, insertion_position, insertion))
+    {
+        print_error("could not record OTP property edit");
+        return false;
+    }
+    return true;
 }
 
 static int compare_edits_descending(const void *left, const void *right)
@@ -525,6 +526,10 @@ static int compare_edits_descending(const void *left, const void *right)
     if (a->start < b->start)
         return 1;
     if (a->start > b->start)
+        return -1;
+    if (a->order < b->order)
+        return 1;
+    if (a->order > b->order)
         return -1;
     return 0;
 }
@@ -588,15 +593,24 @@ static bool json_prepare_otp(void)
         char value[JSON_EDIT_TEXT_MAX];
         size_t length = s_tokens[source].end - s_tokens[source].start;
         if (length >= sizeof value)
+        {
+            print_error("OTP key share row exceeds the supported size");
             return false;
+        }
         memcpy(value, s_json + s_tokens[source].start, length);
         value[length] = '\0';
         if (!json_set_property(root, targets[index], value, false))
+        {
+            print_error("could not add copied OTP key share");
             return false;
+        }
     }
     if (!json_set_property(root, "PAGE24_LOCK1", "\"0x3d3d3d\"", true) ||
         !json_set_property(root, "PAGE25_LOCK1", "\"0x3d3d3d\"", true))
+    {
+        print_error("could not set OTP key page locks");
         return false;
+    }
     size_t crit1 = json_find_property(root, "crit1");
     if (crit1 == SIZE_MAX)
     {
@@ -604,7 +618,10 @@ static bool json_prepare_otp(void)
               "\"debug_disable\":1,\"secure_debug_disable\":1,"
               "\"glitch_detector_enable\":1,\"glitch_detector_sens\":3,"
               "\"secure_boot_enable\":1"))
+        {
+            print_error("could not add OTP security policy");
             return false;
+        }
     }
     else
     {
@@ -614,20 +631,32 @@ static bool json_prepare_otp(void)
             !json_set_property(crit1, "glitch_detector_enable", "1", false) ||
             !json_set_property(crit1, "glitch_detector_sens", "3", false) ||
             !json_set_property(crit1, "secure_boot_enable", "1", false))
+        {
+            print_error("could not update OTP security policy");
             return false;
+        }
     }
     size_t boot_flags1 = json_find_property(root, "boot_flags1");
     if (boot_flags1 == SIZE_MAX)
     {
         if (!json_add_object_properties(root, "boot_flags1", "\"key_invalid\":254"))
+        {
+            print_error("could not add OTP boot flags");
             return false;
+        }
     }
     else if (s_tokens[boot_flags1].type != JSON_OBJECT ||
              !json_set_property(boot_flags1, "key_invalid", "254", false))
     {
+        print_error("could not update OTP boot flags");
         return false;
     }
-    return json_apply_edits();
+    if (!json_apply_edits())
+    {
+        print_error("OTP JSON edits exceed the supported output size");
+        return false;
+    }
+    return true;
 }
 
 static int extend_otp(const char *path)
@@ -650,7 +679,10 @@ static int extend_otp(const char *path)
     s_json[s_json_len] = '\0';
     s_edit_count = 0u;
     if (!json_prepare_otp())
+    {
+        print_error("could not prepare Secure OTP provisioning fields");
         return 1;
+    }
     char temporary[4096];
     int count = snprintf(temporary, sizeof temporary, "%s.tmp.%ld", path, (long)getpid());
     if (count < 0 || (size_t)count >= sizeof temporary)
@@ -659,7 +691,10 @@ static int extend_otp(const char *path)
     mode_t mode = stat(path, &info) == 0 ? info.st_mode & 0777u : 0600u;
     int fd = open(temporary, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, mode);
     if (fd < 0)
+    {
+        print_error("could not create temporary OTP JSON file");
         return 1;
+    }
     size_t written = 0u;
     while (written < s_json_len)
     {

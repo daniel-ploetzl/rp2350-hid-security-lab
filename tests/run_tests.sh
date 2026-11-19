@@ -70,13 +70,24 @@ fi
 printf '%s\n' 'PASS reserved UF2 overlap rejected'
 pass_count=$((pass_count + 1))
 
-cat >"$temporary/otp.json" <<'EOF'
-{"29:0":"share-29-a","29:32":"share-29-b","30:0":"share-30-a","30:32":"share-30-b"}
-EOF
+share_a=$(printf '%400s' '' | tr ' ' a)
+share_b=$(printf '%400s' '' | tr ' ' b)
+share_c=$(printf '%400s' '' | tr ' ' c)
+share_d=$(printf '%400s' '' | tr ' ' d)
+printf '{"29:0":{"share":"%s"},"29:32":{"share":"%s"},' \
+    "$share_a" "$share_b" >"$temporary/otp.json"
+printf '"30:0":{"share":"%s"},"30:32":{"share":"%s"}}\n' \
+    "$share_c" "$share_d" >>"$temporary/otp.json"
 "$temporary/build-tools" extend-otp "$temporary/otp.json"
-for expected in '"24:0":"share-29-a"' '"24:32":"share-29-b"' \
-    '"25:0":"share-30-a"' '"25:32":"share-30-b"' \
-    '"PAGE24_LOCK1":"0x3d3d3d"' '"PAGE25_LOCK1":"0x3d3d3d"' \
+check 'OTP output copies nested share 29:0' grep -Fq \
+    "\"24:0\":{\"share\":\"$share_a\"}" "$temporary/otp.json"
+check 'OTP output copies nested share 29:32' grep -Fq \
+    "\"24:32\":{\"share\":\"$share_b\"}" "$temporary/otp.json"
+check 'OTP output copies nested share 30:0' grep -Fq \
+    "\"25:0\":{\"share\":\"$share_c\"}" "$temporary/otp.json"
+check 'OTP output copies nested share 30:32' grep -Fq \
+    "\"25:32\":{\"share\":\"$share_d\"}" "$temporary/otp.json"
+for expected in '"PAGE24_LOCK1":"0x3d3d3d"' '"PAGE25_LOCK1":"0x3d3d3d"' \
     '"secure_boot_enable":1' '"key_invalid":254'; do
     check "OTP output contains $expected" grep -Fq "$expected" "$temporary/otp.json"
 done

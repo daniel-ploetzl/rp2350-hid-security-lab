@@ -30,6 +30,10 @@ jobs:
             https://github.com/raspberrypi/pico-sdk.git "$RUNNER_TEMP/pico-sdk"
           echo "PICO_SDK_PATH=$RUNNER_TEMP/pico-sdk" >> "$GITHUB_ENV"
 
+      - name: Run host and firmware pairing tests
+        if: matrix.board == 'pico2_w'
+        run: bash tests/run_tests.sh
+
       - name: Create disposable build keys
         run: |
           umask 077
@@ -50,10 +54,6 @@ jobs:
 
       - name: Build host tool
         run: gcc -D_GNU_SOURCE -std=c11 -Wall -Wextra -Werror src/write_config.c -Iinc -lcrypto -o write_config
-
-      - name: Run host and firmware pairing tests
-        if: matrix.board == 'pico2_w'
-        run: bash tests/run_tests.sh
 
       - name: Write checksum
         working-directory: build-${{ matrix.board }}
