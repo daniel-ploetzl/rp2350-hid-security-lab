@@ -21,19 +21,8 @@
 #define CONFIG_PERIOD_MAX_S      604800UL
 #define CONFIG_DEFAULT_PERIOD_S  604800UL
 
-/* A sector of its own, storing an authenticated encrypted Wi-Fi record. */
-#define CREDS_FLASH_ADDR         (CONFIG_FLASH_ADDR - CONFIG_SECTOR_SIZE_BYTES)
-#define CREDS_MAGIC              0x57494649UL
-#define CREDS_VERSION            1UL
-#define CREDS_AUTH_WPA2          2UL
-#define CREDS_AUTH_WPA3          3UL
-#define CREDS_SSID_MAX           32
-#define CREDS_KEY_MIN            8
-#define CREDS_KEY_MAX            64
-
-/* A sector below Wi-Fi holds the authenticated encrypted input sequence.
- * The preceding sector stores the authenticated host pairing public key. */
-#define INPUT_SEQUENCE_FLASH_ADDR   (CREDS_FLASH_ADDR - CONFIG_SECTOR_SIZE_BYTES)
+/* Preserve the unused sector above the stored input sequence on existing boards. */
+#define INPUT_SEQUENCE_FLASH_ADDR (CONFIG_FLASH_ADDR - 2UL * CONFIG_SECTOR_SIZE_BYTES)
 #define INPUT_SEQUENCE_MAGIC        0x4C4F4749UL /* Retained for existing encrypted records. */
 #define INPUT_SEQUENCE_VERSION      2UL
 #define INPUT_SEQUENCE_LINE1_MAX    64
@@ -60,16 +49,6 @@ typedef struct {
     uint32_t period_s;
 } pico_config_t;
 
-/* The arrays hold one extra byte for the terminating NUL. */
-typedef struct {
-    uint32_t magic;
-    uint32_t version;
-    uint32_t auth;
-    char     ssid[CREDS_SSID_MAX + 1];
-    char     key[CREDS_KEY_MAX + 1];
-    uint8_t  reserved[2];
-    uint32_t crc;
-} wifi_creds_t;
 
 /* Authenticated input sequence payload. The field sizes preserve the existing
  * encrypted record layout. Reserved aligns the CRC to four bytes. */
@@ -92,7 +71,7 @@ typedef struct {
     uint32_t crc;
 } pairing_config_t;
 
-/* Fixed-size AES-GCM envelope shared by Wi-Fi and input sequence payloads. */
+/* Fixed-size AES-GCM envelope shared by pairing and input sequence payloads. */
 typedef struct {
     uint32_t magic;
     uint32_t version;
@@ -104,7 +83,6 @@ typedef struct {
 } secure_record_t;
 
 _Static_assert(sizeof(pico_config_t) == 12, "config layout changed, update write_config.c");
-_Static_assert(sizeof(wifi_creds_t) == 116, "credentials layout changed, raise CREDS_VERSION");
 _Static_assert(sizeof(input_sequence_config_t) == 212, "input sequence layout changed, raise INPUT_SEQUENCE_VERSION");
 _Static_assert(sizeof(pairing_config_t) == 80, "pairing layout changed, raise PAIRING_VERSION");
 _Static_assert(sizeof(secure_record_t) == 256, "secure record must fit one UF2 payload");
@@ -150,20 +128,6 @@ static inline uint32_t creds_crc32(const void *data, size_t len)
     return ~crc;
 }
 
-/* Validation split so encrypted records are checked only after authentication. */
-static inline bool wifi_creds_valid(const wifi_creds_t *creds)
-{
-    if (creds->magic != CREDS_MAGIC || creds->version != CREDS_VERSION)
-        return false;
-    if (creds->crc != creds_crc32(creds, offsetof(wifi_creds_t, crc)))
-        return false;
-    if (creds->auth != CREDS_AUTH_WPA2 && creds->auth != CREDS_AUTH_WPA3)
-        return false;
-    if (creds->ssid[0] == '\0' || creds->ssid[CREDS_SSID_MAX] != '\0' ||
-        creds->key[CREDS_KEY_MAX] != '\0')
-        return false;
-    return true;
-}
 
 /* Validate the record before its sequence is copied into SRAM. */
 static inline bool input_sequence_valid(const input_sequence_config_t *sequence)

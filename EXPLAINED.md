@@ -6,7 +6,7 @@ The firmware publishes a 42 byte challenge in `CHALLENG.BIN` on the board’s FA
 
 The host agent signs the protocol domain string, including its terminating zero byte, followed by the board identifier and nonce. It uses ECDSA on P-256 with SHA-256 and writes the two 32 byte signature components to `RESPONSE.BIN`. The firmware verifies them against the enrolled public key. Disconnecting clears authorisation. Reconnecting creates a new challenge.
 
-The firmware gate lives in [pairing.c](src/pairing.c). The [main loop](src/main.c) uses its result to schedule the stored input sequence and subsequent simulated activity. The Pico 2 W wireless manager handles network association and retry. There is no application traffic over that connection.
+The firmware gate lives in [pairing.c](src/pairing.c). The [main loop](src/main.c) uses its result to schedule the stored input sequence and subsequent simulated activity. On the Pico 2 W the CYW43 driver controls the onboard LED without joining a network.
 
 ## What each build protects
 
@@ -87,3 +87,11 @@ cmake -S . -B build-secure -DPICO_BOARD=pico2_w \
   -DHID_LAB_IV_SALT=/secure/path/device-iv.bin
 cmake --build build-secure -j2
 ```
+
+## Local pairing journal
+
+Once the Linux user timer is enabled, the agent handles each connection when the desktop mounts HIDPAIR. Read its output with `journalctl --user -u hid-lab-pair.service -n 20`. Submission confirms a USB write. A separate accepted or rejected message records the verdict reported by the board. A connection that sends no proof produces no rejection.
+
+The firmware and host agent share the status layout in [pairing.h](inc/pairing.h). The board publishes a read only 512 byte `STATUS.BIN` record. Bytes 0 through 2 contain the format version, pairing state and last verdict (0 for none, 1 for accepted or 2 for rejected). Byte 3 is reserved. Bytes 4 through 7 count evaluated proofs in little endian order. Bytes 8 through 39 identify the session nonce and bytes 40 through 103 echo the evaluated signature. Each connection starts with zero attempts. The host reads directly from the volume to avoid cached receipts. If no matching receipt arrives during its observation window, the verdict remains unknown. The journal covers proofs submitted by this agent.
+
+The former wireless settings sector remains reserved to preserve existing encrypted record addresses. Upgrading leaves any previous ciphertext in place. Remote event delivery through ntfy is a possible future extension.

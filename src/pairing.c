@@ -124,6 +124,7 @@ void pairing_task(void)
         create_challenge();
         s_status = s_has_key ? PAIRING_STATUS_PENDING : PAIRING_STATUS_UNPAIRED;
         pairing_storage_new_session();
+        pairing_storage_set_status(s_status, s_nonce, NULL, 0u);
         publish_challenge();
         s_mounted = true;
     }
@@ -135,6 +136,8 @@ void pairing_task(void)
             s_status = PAIRING_STATUS_ALLOWED;
             publish_challenge();
         }
+        pairing_storage_set_status(s_status, s_nonce, s_response,
+                                   s_status == PAIRING_STATUS_ALLOWED ? PROOF_ACCEPTED : PROOF_REJECTED);
         secure_store_clear(s_response, sizeof s_response);
     }
 }

@@ -6,7 +6,7 @@ set(HID_LAB_DEV_AES_KEY "" CACHE FILEPATH "Disposable 32-byte AES key for a deve
 
 # Must be set before the SDK import, which selects the board. Without it the
 # SDK silently falls back to the RP2040 Pico, which this project cannot target.
-set(PICO_BOARD pico2_w CACHE STRING "Target board: pico2_w, or pico2 for no Wi-Fi")
+set(PICO_BOARD pico2_w CACHE STRING "Target board: pico2_w or pico2")
 
 include($ENV{PICO_SDK_PATH}/external/pico_sdk_import.cmake)
 
@@ -35,8 +35,8 @@ else()
     endforeach()
 endif()
 
-# Reserve the last four 4KB sectors for encrypted host pairing, input sequence, Wi-Fi
-# and runtime config. Secure code is linked for SRAM and the packaged UF2 is checked.
+# Reserve the last four sectors for settings and the existing flash layout.
+# Secure code is linked for SRAM and the packaged UF2 is checked.
 # Keep the linker variable distinct from the board's true flash-size macro.
 set(PICO_FLASH_SIZE_BYTES 0x003FC000)
 
@@ -139,11 +139,10 @@ target_link_libraries(hid_lab
     pico_mbedtls_headers
 )
 
-# Wi-Fi is built only for boards with a radio. inc/wifi_manager.h stubs it otherwise.
+# The W board drives its LED through the CYW43 GPIO interface.
 if(PICO_CYW43_SUPPORTED)
-    target_sources(hid_lab PRIVATE src/wifi_manager.c)
-    target_compile_definitions(hid_lab PRIVATE HID_LAB_WIFI=1)
-    target_link_libraries(hid_lab pico_cyw43_arch_lwip_poll)
+    target_link_libraries(hid_lab pico_cyw43_arch_none)
+    target_compile_definitions(hid_lab PRIVATE HID_LAB_RADIO_LED=1)
 endif()
 
 pico_set_binary_type(hid_lab no_flash)

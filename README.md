@@ -4,7 +4,7 @@ Embedded security research firmware for the Raspberry Pi Pico 2 and Pico 2 W. Th
 
 ## Engineering
 
-The board exposes a composite USB device with keyboard, mouse and mass storage interfaces. A FAT volume held in RAM carries the pairing challenge and response. A Linux process exchanges these records through ordinary file operations under the user's account. Pairing requires only USB and access to the mounted volume.
+The board exposes a composite USB device with keyboard, mouse and mass storage interfaces. A FAT volume held in RAM carries the pairing challenge and response. A Linux process exchanges these records through ordinary file operations under the user's account. The agent records the board’s verdict in the local user journal. Pairing requires only USB and access to the mounted volume.
 
 A cooperative firmware loop services TinyUSB, advances the pairing state machine and schedules input. Both the stored input sequence and simulated activity depend on the same authorisation decision. Disconnecting clears the session before the board issues another challenge. [Firmware main loop](src/main.c)
 

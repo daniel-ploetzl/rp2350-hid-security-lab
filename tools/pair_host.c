@@ -1,5 +1,7 @@
 /* Sign a fresh board challenge through its mounted USB storage volume. */
 #define _GNU_SOURCE
+#include "../inc/pairing.h"
+#include <time.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <openssl/bio.h>
@@ -184,6 +186,39 @@ static EVP_PKEY *load_private_key(const char *path)
     return key;
 }
 
+/* Direct reads bypass cached FAT data. A matching receipt identifies this proof. */
+static void log_verdict(int directory_fd, const uint8_t *nonce, const uint8_t *signature)
+{
+    int fd = openat(directory_fd, "STATUS.BIN", O_RDONLY | O_DIRECT | O_NOFOLLOW |
+                                                O_CLOEXEC | O_NONBLOCK);
+    struct stat info;
+    if (fd < 0)
+        return;
+    if (fstat(fd, &info) == 0 && S_ISREG(info.st_mode) &&
+        info.st_size == (off_t)sizeof(pairing_status_t))
+    {
+        _Alignas(4096) pairing_status_t report;
+        const struct timespec interval = {.tv_nsec = 50000000};
+        for (unsigned attempt = 0; attempt < 10u; attempt++)
+        {
+            if (pread(fd, &report, sizeof report, 0) != (ssize_t)sizeof report)
+                break;
+            if (report.version == 1u &&
+                memcmp(report.nonce, nonce, sizeof report.nonce) == 0 &&
+                memcmp(report.response, signature, sizeof report.response) == 0)
+            {
+                if (report.verdict == PROOF_ACCEPTED && report.state == 2u)
+                    puts("Board reports pairing proof accepted");
+                else if (report.verdict == PROOF_REJECTED && report.state == 1u)
+                    puts("Board reports pairing proof rejected");
+                break;
+            }
+            nanosleep(&interval, NULL);
+        }
+    }
+    close(fd);
+}
+
 static bool exchange_at_mount(const char *mount_path, EVP_PKEY *key)
 {
     int directory_fd = open(mount_path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
@@ -194,6 +229,8 @@ static bool exchange_at_mount(const char *mount_path, EVP_PKEY *key)
     bool valid = read_challenge(directory_fd, challenge) &&
                  sign_challenge(key, challenge, signature) &&
                  submit_response(directory_fd, signature);
+    if (valid)
+        log_verdict(directory_fd, challenge + 10u, signature);
     clear_bytes(challenge, sizeof challenge);
     clear_bytes(signature, sizeof signature);
     close(directory_fd);
