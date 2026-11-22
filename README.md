@@ -1,44 +1,29 @@
 # RP2350 HID Security Lab
 
-An RP2350 firmware research project for analysing USB HID behaviour, host authorisation and secure embedded design on the Raspberry Pi Pico 2 and Pico 2 W.
+Embedded security research firmware for the Raspberry Pi Pico 2 and Pico 2 W. The firmware controls USB keyboard and mouse output by requiring proof that the host holds an enrolled private key. Authorisation lasts for one USB connection.
 
-This portfolio project demonstrates RP2350 firmware engineering through USB HID report modelling, a cryptographic host authorisation protocol and protected configuration storage. Its purpose is to explore how embedded security features interact with device behaviour and host software.
+## Engineering
 
-## What it demonstrates
+The board exposes a composite USB device with keyboard, mouse and mass storage interfaces. A FAT volume held in RAM carries the pairing challenge and response. A Linux process exchanges these records through ordinary file operations under the user's account. Pairing requires only USB and access to the mounted volume.
 
-- Cooperative, non-blocking firmware with independent keyboard and mouse state machines
-- Composite USB HID with keyboard, mouse and a RAM-backed pairing volume
-- Fresh challenge and signature based host authorisation before HID reports are released
-- AES-GCM encrypted configuration records and RP2350 secure boot and OTP integration
-- C firmware, configuration writer, host utilities and firmware pairing tests
+A cooperative firmware loop services TinyUSB, advances the pairing state machine and schedules input. Both the stored input sequence and simulated activity depend on the same authorisation decision. Disconnecting clears the session before the board issues another challenge. [Firmware main loop](src/main.c)
 
-## Security boundary
+## Security
 
-Host authorisation gates simulated HID reports on proof of possession of an enrolled key. It does not conceal reports from the authorised host or a USB capture device. Decrypted input data and cryptographic key material exist in device memory at runtime. Development builds use recoverable test keys and must never contain real secrets or be provisioned as production devices.
+**Host authorisation.** The host signs a protocol identifier, the board identifier and a fresh 32 byte nonce using ECDSA on P-256 with SHA-256. The firmware verifies the signature against the enrolled public key. Binding the signature to both the board and its current nonce prevents a recorded response from authorising a later session. [Pairing verifier](src/pairing.c)
 
-## Build and test
+**Firmware and configuration integrity.** The secure build signs and encrypts the firmware image for a board provisioned with matching OTP keys. Configuration records use AES-GCM. At startup the firmware imports key shares from OTP and locks the source pages against further reads. Development images embed a recoverable test key. [Protected storage](src/secure_store.c)
 
-The firmware requires the Raspberry Pi Pico SDK with RP2350 support, CMake and the ARM GCC toolchain. Secure builds also require protected signing, AES and IV key files. Host tools require a C compiler and OpenSSL. Project code and tests are written in C and Bash. The Pico SDK uses Python internally for its build support. See [EXPLAINED.md](EXPLAINED.md) for key handling, development pairing, provisioning limits and host setup.
+**Trust boundary.** A copied host private key grants the same authority as the original. Once the firmware releases keyboard reports, the receiving host or a USB capture device can observe the keystrokes.
 
-```sh
-cmake -S . -B build \
-  -DHID_LAB_SIGNING_KEY=/secure/path/signing.pem \
-  -DHID_LAB_AES_KEY=/secure/path/device-aes.bin \
-  -DHID_LAB_IV_SALT=/secure/path/device-iv.bin
-cmake --build build -j2
+## Verification
+
+The host harness compiles the firmware verifier with the Pico SDK's Mbed TLS sources. It substitutes deterministic board identity, randomness and USB connection state to exercise valid signatures, incorrect keys, altered challenges and replay after reconnect. CI also builds the secure image for both boards and checks that UF2 payloads stay below the reserved configuration sectors.
+
+Set `PICO_SDK_PATH` to a Pico SDK checkout with its submodules. With Bash, a host C compiler and OpenSSL development files installed, run the suite from the repository root.
+
+```bash
 bash tests/run_tests.sh
 ```
 
-The host suite compiles the firmware pairing module against the Pico SDK's Mbed TLS sources and stubs USB, OTP storage and board identity. It exercises rejection and acceptance paths without hardware or OTP programming. CI firmware artifacts use disposable keys and are for build verification only.
-
-## Repository map
-
-- `src/` firmware and the C configuration writer
-- `inc/` firmware interfaces and configuration definitions
-- `tools/` C build helpers and the Linux pairing agent
-- `systemd/user/` optional rootless host pairing timer
-- `tests/` host-side tests
-
-## Scope
-
-This is a security design and research prototype. Its threat model, limitations, setup instructions and implementation notes are documented in [EXPLAINED.md](EXPLAINED.md).
+For key backup, build profiles and hardware verification, see the [design and hardware guide](EXPLAINED.md).
