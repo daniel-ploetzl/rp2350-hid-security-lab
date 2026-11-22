@@ -127,16 +127,3 @@ bool secure_store_open(uint32_t flash_addr, const void *record_ptr,
     }
     return true;
 }
-
-bool secure_store_read_wifi(wifi_creds_t *out)
-{
-    const secure_record_t *record = (const secure_record_t *)CREDS_FLASH_ADDR;
-    if (!secure_store_open(CREDS_FLASH_ADDR, record, out, sizeof(*out)))
-        return false;
-    if (!wifi_creds_valid(out))
-    {
-        secure_store_clear(out, sizeof(*out));
-        return false;
-    }
-    return true;
-}

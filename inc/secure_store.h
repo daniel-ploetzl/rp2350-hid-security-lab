@@ -16,8 +16,6 @@ bool secure_store_init(void);
 bool secure_store_open(uint32_t flash_addr, const void *record,
                        void *plaintext, size_t plaintext_size);
 
-bool secure_store_read_wifi(wifi_creds_t *out);
-
 void secure_store_clear(void *ptr, size_t len);
 
 #endif

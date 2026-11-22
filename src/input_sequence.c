@@ -1,5 +1,5 @@
 /*
- * Stored input sequence state machine. See inc/input_sequence.h for its model.
+ * Stored input sequence state machine.
  *
  *   The sequence to type is flattened once at the start into s_seq. After
  *   the host-session wait it appends the final configured action. Each pass
@@ -8,7 +8,7 @@
  *   so the sequence does not linger in RAM.
  */
 
-#include "input_sequence.h"
+#include "input_tasks.h"
 #include "hid_keymap.h"
 #include "hid_assert.h"
 #include "secure_store.h"

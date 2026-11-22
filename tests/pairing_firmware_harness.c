@@ -140,3 +140,11 @@ int main(int argc, char **argv)
     secure_store_clear(response, sizeof response);
     return EXIT_SUCCESS;
 }
+
+void pairing_storage_set_status(uint8_t state, const uint8_t nonce[32],
+                                const uint8_t *response, uint8_t verdict)
+{
+    (void)nonce;
+    if (response != NULL && verdict != (state == PAIRING_STATUS_ALLOWED ? 1u : 2u))
+        abort();
+}

@@ -46,6 +46,10 @@ check() {
     fi
 }
 
+"$cc" -std=c11 -Wall -Wextra -Werror -I"$root/inc" -I"$root/tests/pairing_stubs" \
+    "$root/tests/pairing_status.c" "$root/src/pairing_storage.c" -o "$temporary/status-test"
+check "status sector is read only and resets on reconnect" "$temporary/status-test"
+
 dd if=/dev/zero of="$temporary/aes-key" bs=32 count=1 status=none
 "$temporary/build-tools" embed-key "$temporary/aes-key" "$temporary/key.h"
 check 'development key header is owner only' test "$(stat -c %a "$temporary/key.h")" = 600
@@ -169,5 +173,39 @@ mkdir "$mount"
 dd if=/dev/zero of="$mount/RESPONSE.BIN" bs=64 count=1 status=none
 check 'C host agent submits proof through mounted files' "$temporary/pair-host" \
     --key "$temporary/host-private.pem" --mount "$mount"
+
+# Simulate the board publishing a receipt after it receives each new signature.
+for verdict in accepted rejected stale; do
+    truncate -s 0 "$mount/RESPONSE.BIN"
+    truncate -s 64 "$mount/RESPONSE.BIN"
+    truncate -s 0 "$mount/STATUS.BIN"
+    truncate -s 512 "$mount/STATUS.BIN"
+    (
+        for ((poll=0; poll<100; poll++)); do
+            if ! cmp -s -n 64 "$mount/RESPONSE.BIN" /dev/zero; then break; fi
+            sleep 0.01
+        done
+        if [[ "$verdict" == rejected ]]; then
+            printf '\001\001\002\000\001\000\000\000'
+        else
+            printf '\001\002\001\000\001\000\000\000'
+        fi
+        if [[ "$verdict" == stale ]]; then head -c 32 /dev/zero
+        else tail -c 32 "$mount/CHALLENG.BIN"; fi
+        cat "$mount/RESPONSE.BIN"
+        head -c 408 /dev/zero
+    ) >"$temporary/receipt" &
+    publisher=$!
+    "$temporary/pair-host" --key "$temporary/host-private.pem" --mount "$mount" >"$temporary/journal" &
+    observer=$!
+    wait "$publisher"
+    dd if="$temporary/receipt" of="$mount/STATUS.BIN" conv=notrunc,fsync status=none
+    wait "$observer"
+    if [[ "$verdict" == stale ]]; then
+        check 'stale receipt produces no verdict' test "$(wc -l <"$temporary/journal")" = 1
+    else
+        check "journal reports $verdict" grep -Fxq "Board reports pairing proof $verdict" "$temporary/journal"
+    fi
+done
 
 printf 'Completed %s C and Bash checks\n' "$pass_count"

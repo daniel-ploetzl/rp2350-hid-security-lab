@@ -7,9 +7,6 @@
  *   [4..7]   hours    = N           (little-endian u32)
  *   [8..11]  period_s = N           (little-endian u32, re-activation gap)
  *
- * WI-FI SETTINGS LAYOUT IN FLASH (sector before it, offset 0x3FE000):
- *   encrypted secure_record_t, carrying a wifi_creds_t payload.
- *
  * INPUT SEQUENCE LAYOUT IN FLASH (sector before that, offset 0x3FD000):
  *   encrypted secure_record_t, carrying an input_sequence_config_t payload.
  */
@@ -55,7 +52,6 @@ typedef struct __attribute__((packed)) {
 } uf2_block_t;
 
 _Static_assert(sizeof(uf2_block_t) == 512, "UF2 blocks must be exactly 512 bytes");
-_Static_assert(sizeof(wifi_creds_t) <= UF2_PAYLOAD_SIZE, "credentials must fit one UF2 block");
 _Static_assert(sizeof(input_sequence_config_t) <= UF2_PAYLOAD_SIZE, "input sequence must fit one UF2 block");
 _Static_assert(sizeof(pairing_config_t) <= UF2_PAYLOAD_SIZE, "pairing record must fit one UF2 block");
 _Static_assert(sizeof(secure_record_t) == UF2_PAYLOAD_SIZE, "encrypted record must fill one UF2 payload");
@@ -236,97 +232,7 @@ static int write_run_config(const char *hours_arg, const char *period_arg)
     return 0;
 }
 
-static int read_device_key(const char *path, uint8_t key[32]);
-static int seal_record(uint32_t addr, const void *plain, size_t plain_len,
-                       const uint8_t key[32], secure_record_t *record);
-
-static int write_credentials(const char *auth_name, const char *ssid, const char *key_path)
-{
-    uint32_t auth;
-
-    if (strcmp(auth_name, "wpa2") == 0)
-        auth = CREDS_AUTH_WPA2;
-    else if (strcmp(auth_name, "wpa3") == 0)
-        auth = CREDS_AUTH_WPA3;
-    else
-        return (fprintf(stderr, "Error: security mode must be wpa2 or wpa3\n"), 1);
-
-    size_t ssid_len = strlen(ssid);
-    if (ssid_len == 0 || ssid_len > CREDS_SSID_MAX)
-        return (fprintf(stderr, "Error: SSID must be 1-%d bytes\n", CREDS_SSID_MAX), 1);
-
-    /* Two spare bytes: a longer line then reads as too long, not as a cut-off password. */
-    char key[CREDS_KEY_MAX + 3];
-    if (read_hidden_line(key, sizeof(key), "Wi-Fi password: ") != 0)
-    {
-        secure_clear(key, sizeof(key));
-        return (fprintf(stderr, "Error: no password on standard input\n"), 1);
-    }
-
-    size_t key_len = strlen(key);
-    if (key_len < CREDS_KEY_MIN || key_len > CREDS_KEY_MAX)
-    {
-        secure_clear(key, sizeof(key));
-        return (fprintf(stderr, "Error: password must be %d-%d bytes\n",
-                        CREDS_KEY_MIN, CREDS_KEY_MAX), 1);
-    }
-
-    uint8_t crypto_key[32] = {0};
-    if (read_device_key(key_path, crypto_key) != 0)
-    {
-        secure_clear(key, sizeof key);
-        secure_clear(crypto_key, sizeof crypto_key);
-        return 1;
-    }
-
-    /* Zeroed first, so unused bytes have a stable CRC inside the encrypted payload. */
-    wifi_creds_t creds;
-    memset(&creds, 0, sizeof(creds));
-    write_le32(&creds.magic, CREDS_MAGIC);
-    write_le32(&creds.version, CREDS_VERSION);
-    write_le32(&creds.auth, auth);
-    memcpy(creds.ssid, ssid, ssid_len);
-    memcpy(creds.key, key, key_len);
-    write_le32(&creds.crc, creds_crc32(&creds, offsetof(wifi_creds_t, crc)));
-
-    secure_record_t sealed;
-    if (seal_record(CREDS_FLASH_ADDR, &creds, sizeof creds,
-                    crypto_key, &sealed) != 0)
-    {
-        secure_clear(key, sizeof key);
-        secure_clear(crypto_key, sizeof crypto_key);
-        secure_clear(&creds, sizeof creds);
-        return (fprintf(stderr, "Error: could not encrypt Wi-Fi record\n"), 1);
-    }
-    if (write_uf2(CREDS_FLASH_ADDR, &sealed, sizeof sealed) != 0)
-    {
-        secure_clear(key, sizeof(key));
-        secure_clear(crypto_key, sizeof crypto_key);
-        secure_clear(&creds, sizeof(creds));
-        secure_clear(&sealed, sizeof sealed);
-        return 1;
-    }
-    printf("Stored credentials for %s\n", ssid);
-    secure_clear(key, sizeof(key));
-    secure_clear(crypto_key, sizeof crypto_key);
-    secure_clear(&creds, sizeof(creds));
-    secure_clear(&sealed, sizeof sealed);
-    return 0;
-}
-
-/* The bootrom erases a sector before its first write, so this removes the old record. */
-static int clear_credentials(void)
-{
-    const uint8_t blank[sizeof(secure_record_t)] = {0};
-
-    if (write_uf2(CREDS_FLASH_ADDR, blank, sizeof(blank)) != 0)
-        return 1;
-    printf("Credentials cleared\n");
-    return 0;
-}
-
-/* Rejects a field with any character the DE layout cannot type, so the device
- * is never asked to type something it has no key for. */
+/* Reject unsupported characters before storing the sequence. */
 static int check_typeable(const char *what, const char *s)
 {
     for (size_t i = 0; s[i] != '\0'; i++)
@@ -606,14 +512,10 @@ static int clear_input_sequence(void)
 
 int main(int ac, char **av)
 {
-    if (ac == 2 && strcmp(av[1], "--wifi-clear") == 0)
-        return clear_credentials();
     if (ac == 2 && strcmp(av[1], "--sequence-clear") == 0)
         return clear_input_sequence();
     if (ac == 2 && strcmp(av[1], "--pair-clear") == 0)
         return clear_host_pairing();
-    if (ac == 5 && strcmp(av[1], "--wifi") == 0)
-        return write_credentials(av[2], av[3], av[4]);
     if (ac == 3 && strcmp(av[1], "--sequence") == 0)
         return write_input_sequence(av[2]);
     if (ac == 4 && strcmp(av[1], "--pair-host") == 0)
@@ -622,8 +524,6 @@ int main(int ac, char **av)
         return write_run_config(av[1], ac == 3 ? av[2] : NULL);
 
     fprintf(stderr, "Usage: %s <hours> [period]    period e.g. 3600, 30m, 1h, 1d, 7d. Default 7d\n", av[0]);
-    fprintf(stderr, "       %s --wifi <wpa2|wpa3> <ssid> <aes-key-file>   (password from hidden standard input)\n", av[0]);
-    fprintf(stderr, "       %s --wifi-clear\n", av[0]);
     fprintf(stderr, "       %s --sequence <aes-key-file>      (three hidden input sequence lines)\n", av[0]);
     fprintf(stderr, "       %s --sequence-clear\n", av[0]);
     fprintf(stderr, "       %s --pair-host <host-public.pem> <aes-key-file>\n", av[0]);

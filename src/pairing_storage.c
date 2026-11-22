@@ -7,11 +7,13 @@
 #define DISK_BLOCK_BYTES 512u
 #define CHALLENGE_LBA 3u
 #define RESPONSE_LBA 4u
+#define STATUS_LBA 5u
 #define CHALLENGE_BYTES 42u
 #define RESPONSE_BYTES 64u
 
 static uint8_t s_disk[DISK_BLOCK_COUNT][DISK_BLOCK_BYTES];
 static uint64_t s_response_written;
+static uint32_t s_attempts;
 
 static void set_directory_entry(uint8_t *entry, const char *name,
                                 const char *extension, uint16_t cluster,
@@ -64,6 +66,8 @@ static void initialise_fat_volume(void)
     s_disk[1][3] = 0xFFu;
     s_disk[1][4] = 0xFFu;
     s_disk[1][5] = 0xFFu;
+    s_disk[1][6] = 0xFFu;
+    s_disk[1][7] = 0x0Fu;
 
     memcpy(s_disk[2], "HIDPAIR    ", 11u);
     s_disk[2][11] = 0x08u;
@@ -71,6 +75,8 @@ static void initialise_fat_volume(void)
                         CHALLENGE_BYTES);
     set_directory_entry(s_disk[2] + 64u, "RESPONSE", "BIN", 3u,
                         RESPONSE_BYTES);
+    set_directory_entry(s_disk[2] + 96u, "STATUS  ", "BIN", 4u, DISK_BLOCK_BYTES);
+    s_disk[2][96u + 11u] = 0x21u;
 }
 
 void pairing_storage_init(void)
@@ -83,6 +89,7 @@ void pairing_storage_init(void)
 void pairing_storage_new_session(void)
 {
     memset(s_disk[RESPONSE_LBA], 0, DISK_BLOCK_BYTES);
+    s_attempts = 0u;
     s_response_written = 0u;
 }
 
@@ -139,7 +146,7 @@ int32_t tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset,
 {
     (void)lun;
     if (buffer == NULL || lba >= DISK_BLOCK_COUNT || offset >= DISK_BLOCK_BYTES ||
-        buffer_size > DISK_BLOCK_BYTES - offset || lba == 0u || lba == CHALLENGE_LBA)
+        buffer_size > DISK_BLOCK_BYTES - offset || lba == 0u || lba == CHALLENGE_LBA || lba == STATUS_LBA)
         return -1;
     memcpy(&s_disk[lba][offset], buffer, buffer_size);
     if (lba == RESPONSE_LBA)
@@ -154,7 +161,10 @@ int32_t tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset,
                 s_response_written |= UINT64_C(1) << index;
         }
         if (s_response_written == UINT64_MAX)
+        {
             pairing_submit_response(s_disk[RESPONSE_LBA], RESPONSE_BYTES);
+            s_response_written = 0u;
+        }
     }
     return (int32_t)buffer_size;
 }
@@ -167,4 +177,21 @@ int32_t tud_msc_scsi_cb(uint8_t lun, uint8_t const command[16],
     (void)buffer_size;
     tud_msc_set_sense(lun, SCSI_SENSE_ILLEGAL_REQUEST, 0x20u, 0x00u);
     return -1;
+}
+
+/* Publish the last evaluated response so the observer can correlate its receipt. */
+void pairing_storage_set_status(uint8_t state, const uint8_t nonce[32],
+                                const uint8_t *response, uint8_t verdict)
+{
+    pairing_status_t report = {.version = 1u, .state = state, .verdict = verdict};
+    memcpy(report.nonce, nonce, sizeof report.nonce);
+    if (response != NULL)
+    {
+        if (s_attempts < UINT32_MAX)
+            s_attempts++;
+        memcpy(report.response, response, sizeof report.response);
+    }
+    for (unsigned i = 0; i < sizeof report.attempts_le; i++)
+        report.attempts_le[i] = (uint8_t)(s_attempts >> (8u * i));
+    memcpy(s_disk[STATUS_LBA], &report, sizeof report);
 }

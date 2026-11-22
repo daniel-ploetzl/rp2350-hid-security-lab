@@ -1,7 +1,7 @@
 /*
  * RP2350 HID Security Lab main loop
  *
- * Starts protected storage, USB host authorisation and Wi-Fi. The loop services
+ * Starts protected storage and USB host authorisation. The loop services
  * USB, verifies host proofs, schedules input behaviour and manages reactivation.
  * A configured input sequence owns the keyboard until it has completed.
  */
@@ -13,8 +13,9 @@
 #include "tusb.h"
 #include "input_tasks.h"
 #include "reactivation.h"
-#include "input_sequence.h"
-#include "wifi_manager.h"
+#if HID_LAB_RADIO_LED
+#include "pico/cyw43_arch.h"
+#endif
 #include "flash_config.h"
 #include "secure_store.h"
 #include "pairing.h"
@@ -30,6 +31,10 @@ static_assert(CONFIG_FLASH_TOTAL_BYTES == PICO_FLASH_SIZE_BYTES,
               "flash_config.h flash size must match the board");
 static_assert(CONFIG_SECTOR_SIZE_BYTES == FLASH_SECTOR_SIZE,
               "flash_config.h sector size must match the SDK");
+
+#if HID_LAB_RADIO_LED
+static bool s_led_ready;
+#endif
 
 #define MS_PER_HOUR 3600000UL
 
@@ -48,7 +53,12 @@ static void led_update(bool on)
 
     if (led_known && led_on == on)
         return;
-    status_led_write(on);
+#if HID_LAB_RADIO_LED
+    if (s_led_ready)
+        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, on);
+#else
+    board_led_write(on);
+#endif
     led_on = on;
     led_known = true;
 }
@@ -60,7 +70,9 @@ int main(void)
     HID_ASSERT(secure_store_init());
     /* Test builds halt here, before USB starts, to prove assertions survive Release. */
     HID_ASSERT(!HID_LAB_TEST_ASSERT);
-    wifi_manager_init();
+#if HID_LAB_RADIO_LED
+    s_led_ready = cyw43_arch_init() == 0;
+#endif
     tusb_init();
     pairing_init();
 
@@ -92,7 +104,6 @@ int main(void)
     {
         tud_task();
         pairing_task();
-        wifi_manager_task();
         uint32_t now = now_ms();
         bool authorised = pairing_is_authorised();
         if (authorised && !was_authorised)
@@ -110,7 +121,7 @@ int main(void)
         /* A steady LED proves pairing succeeded without reading a cached FAT file. */
         led_update(pairing_is_authorised());
 #else
-        led_update(status_led_state(window, now));
+        led_update(window);
 #endif
 
         /* The stored input sequence owns the keyboard until it completes.
