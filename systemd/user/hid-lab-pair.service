@@ -3,7 +3,7 @@ Description=Exchange the paired HID Lab challenge through USB storage
 
 [Service]
 Type=oneshot
-ExecStart=%h/.local/libexec/hid-lab/pair-host --key %h/.config/hid-lab/host-private.pem
+ExecStart=%h/.local/libexec/hid-lab/pair_host --key %h/.config/hid-lab/host-private.pem
 TimeoutStartSec=10s
 UMask=0077
 NoNewPrivileges=yes

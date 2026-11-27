@@ -14,7 +14,11 @@ cc=${CC:-cc}
 "$cc" -std=c11 -Wall -Wextra -Werror "$root/tools/build_tools.c" \
     -o "$temporary/build-tools"
 "$cc" -std=c11 -Wall -Wextra -Werror \
-    "$root/tools/pair_host.c" -lcrypto -o "$temporary/pair-host"
+    "-DHID_LAB_BOOT_VOLUME_ROOT=\"$temporary\"" -I"$root/inc" \
+    "$root/tools/pair_host.c" -lcrypto -o "$temporary/pair_host"
+"$cc" -D_GNU_SOURCE -std=c11 -Wall -Wextra -Werror \
+    "-DHID_LAB_BOOT_VOLUME_ROOT=\"$temporary\"" \
+    "$root/tools/write_config.c" -I"$root/inc" -lcrypto -o "$temporary/write_config"
 "$cc" -std=c11 -Wall -Wextra -Werror "$root/tests/make_uf2.c" \
     -o "$temporary/make-uf2"
 "$cc" -std=c11 -Wall -Wextra -Werror "$root/tests/signature_convert.c" \
@@ -49,6 +53,21 @@ check() {
 "$cc" -std=c11 -Wall -Wextra -Werror -I"$root/inc" -I"$root/tests/pairing_stubs" \
     "$root/tests/pairing_status.c" "$root/src/pairing_storage.c" -o "$temporary/status-test"
 check "status sector is read only and resets on reconnect" "$temporary/status-test"
+
+mkdir -p "$temporary/fixture/RP2350"
+dd if=/dev/zero of="$temporary/device-aes" bs=32 count=1 status=none
+chmod 600 "$temporary/device-aes"
+printf 'alpha\n\nprintf\n' | USER=fixture "$temporary/write_config" 14 3d \
+    --sequence "$temporary/device-aes"
+config_uf2="$temporary/fixture/RP2350/pico_hid_cfg.uf2"
+uf2_word() {
+    od --endian=little -An -tu4 -j "$2" -N4 "$1" | tr -d '[:space:]'
+}
+check 'combined schedule and sequence create two UF2 blocks' test "$(stat -c %s "$config_uf2")" = 1024
+check 'schedule is first block with count two' test "$(uf2_word "$config_uf2" 20)" = 0
+check 'sequence is second block with count two' test "$(uf2_word "$config_uf2" 532)" = 1
+check 'combined UF2 carries the requested hours' test "$(uf2_word "$config_uf2" 36)" = 14
+check 'combined UF2 carries the requested period' test "$(uf2_word "$config_uf2" 40)" = 259200
 
 dd if=/dev/zero of="$temporary/aes-key" bs=32 count=1 status=none
 "$temporary/build-tools" embed-key "$temporary/aes-key" "$temporary/key.h"
@@ -106,6 +125,18 @@ touch "$temporary/empty"
 openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:prime256v1 \
     -out "$temporary/other-private.pem" 2>/dev/null
 chmod 600 "$temporary/other-private.pem"
+chmod 600 "$temporary/aes-key"
+USER=fixture "$temporary/pair_host" --enrol --key "$temporary/host-private.pem" \
+    --aes-key "$temporary/aes-key"
+enrolment_uf2="$temporary/fixture/RP2350/pico_hid_cfg.uf2"
+check 'pair_host enrolment writes the pairing sector' test \
+    "$(uf2_word "$enrolment_uf2" 12)" = "$((0x103fc000))"
+check 'pair_host enrolment emits one UF2 block' test "$(stat -c %s "$enrolment_uf2")" = 512
+USER=fixture "$temporary/pair_host" --clear-enrolment
+pairing_is_clear() {
+    dd if="$1" bs=1 skip=32 count=256 status=none | cmp - <(head -c 256 /dev/zero)
+}
+check 'pair_host can clear the pairing record' pairing_is_clear "$enrolment_uf2"
 "$temporary/pairing-harness" "$temporary/host-public.raw" "$temporary/empty" dump \
     >"$temporary/challenge.bin"
 dd if=/dev/zero of="$temporary/response.bin" bs=64 count=1 status=none
@@ -171,7 +202,7 @@ mkdir "$mount"
 "$temporary/pairing-harness" "$temporary/host-public.raw" "$temporary/empty" dump \
     >"$mount/CHALLENG.BIN"
 dd if=/dev/zero of="$mount/RESPONSE.BIN" bs=64 count=1 status=none
-check 'C host agent submits proof through mounted files' "$temporary/pair-host" \
+check 'C host agent submits proof through mounted files' "$temporary/pair_host" \
     --key "$temporary/host-private.pem" --mount "$mount"
 
 # Simulate the board publishing a receipt after it receives each new signature.
@@ -196,7 +227,7 @@ for verdict in accepted rejected stale; do
         head -c 408 /dev/zero
     ) >"$temporary/receipt" &
     publisher=$!
-    "$temporary/pair-host" --key "$temporary/host-private.pem" --mount "$mount" >"$temporary/journal" &
+    "$temporary/pair_host" --key "$temporary/host-private.pem" --mount "$mount" >"$temporary/journal" &
     observer=$!
     wait "$publisher"
     dd if="$temporary/receipt" of="$mount/STATUS.BIN" conv=notrunc,fsync status=none
