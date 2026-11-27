@@ -1,9 +1,12 @@
 /* Sign a fresh board challenge through its mounted USB storage volume. */
 #define _GNU_SOURCE
 #include "../inc/pairing.h"
+#include "../inc/flash_config.h"
 #include <time.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <openssl/core_names.h>
+#include <openssl/rand.h>
 #include <openssl/bio.h>
 #include <openssl/bn.h>
 #include <openssl/ec.h>
@@ -22,6 +25,31 @@
 #define SIGNATURE_BYTES 64u
 #define MOUNT_ROWS_MAX 256u
 #define MOUNT_LINE_BYTES 1024u
+#define UF2_MAGIC0 0x0A324655u
+#define UF2_MAGIC1 0x9E5D5157u
+#define UF2_MAGIC_END 0x0AB16F30u
+#define UF2_FAMILY_FLAG 0x00002000u
+#define UF2_RP2350_FAMILY 0xE48BFF59u
+#define UF2_PAYLOAD_BYTES 256u
+#define UF2_DATA_BYTES 476u
+#ifndef HID_LAB_BOOT_VOLUME_ROOT
+#define HID_LAB_BOOT_VOLUME_ROOT "/media"
+#endif
+
+typedef struct __attribute__((packed)) {
+    uint32_t magic0;
+    uint32_t magic1;
+    uint32_t flags;
+    uint32_t target;
+    uint32_t payload_size;
+    uint32_t block_number;
+    uint32_t block_count;
+    uint32_t family;
+    uint8_t data[UF2_DATA_BYTES];
+    uint32_t magic_end;
+} enrolment_uf2_t;
+
+_Static_assert(sizeof(enrolment_uf2_t) == 512u, "UF2 block size changed");
 
 static const char s_challenge_name[] = "CHALLENG.BIN";
 static const char s_response_name[] = "RESPONSE.BIN";
@@ -32,6 +60,15 @@ static void clear_bytes(void *buffer, size_t length)
     volatile uint8_t *bytes = buffer;
     while (length-- > 0u)
         *bytes++ = 0u;
+}
+
+static void write_le32(void *destination, uint32_t value)
+{
+    uint8_t *bytes = destination;
+    bytes[0] = (uint8_t)value;
+    bytes[1] = (uint8_t)(value >> 8);
+    bytes[2] = (uint8_t)(value >> 16);
+    bytes[3] = (uint8_t)(value >> 24);
 }
 
 static bool read_full(int fd, uint8_t *buffer, size_t length)
@@ -186,6 +223,136 @@ static EVP_PKEY *load_private_key(const char *path)
     return key;
 }
 
+static bool read_device_key(const char *path, uint8_t key[32])
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0)
+        return false;
+    struct stat info;
+    bool valid = fstat(fd, &info) == 0 && S_ISREG(info.st_mode) &&
+                 (info.st_mode & 077u) == 0u && info.st_size == 32 &&
+                 read_full(fd, key, 32u);
+    close(fd);
+    return valid;
+}
+
+static bool make_pairing_record(EVP_PKEY *host_key, const uint8_t aes_key[32],
+                                secure_record_t *record)
+{
+    pairing_config_t plain = {0};
+    BIGNUM *x = NULL;
+    BIGNUM *y = NULL;
+    bool valid = EVP_PKEY_get_bn_param(host_key, OSSL_PKEY_PARAM_EC_PUB_X, &x) == 1 &&
+                 EVP_PKEY_get_bn_param(host_key, OSSL_PKEY_PARAM_EC_PUB_Y, &y) == 1;
+    if (valid)
+    {
+        plain.public_key[0] = 0x04u;
+        valid = BN_bn2binpad(x, plain.public_key + 1u, 32) == 32 &&
+                BN_bn2binpad(y, plain.public_key + 33u, 32) == 32;
+    }
+    BN_free(x);
+    BN_free(y);
+    if (!valid)
+        return false;
+    write_le32(&plain.magic, PAIRING_MAGIC);
+    write_le32(&plain.version, PAIRING_VERSION);
+    write_le32(&plain.crc, creds_crc32(&plain, offsetof(pairing_config_t, crc)));
+    memset(record, 0, sizeof *record);
+    write_le32(&record->magic, SECURE_RECORD_MAGIC);
+    write_le32(&record->version, SECURE_RECORD_VERSION);
+    write_le32(&record->payload_len, sizeof plain);
+    uint8_t aad[16];
+    memcpy(aad, record, 12u);
+    write_le32(aad + 12u, PAIRING_FLASH_ADDR);
+    EVP_CIPHER_CTX *context = EVP_CIPHER_CTX_new();
+    int output_bytes = 0;
+    int final_bytes = 0;
+    valid = context != NULL && RAND_bytes(record->nonce, sizeof record->nonce) == 1 &&
+            EVP_EncryptInit_ex(context, EVP_aes_256_gcm(), NULL, NULL, NULL) == 1 &&
+            EVP_CIPHER_CTX_ctrl(context, EVP_CTRL_GCM_SET_IVLEN,
+                                sizeof record->nonce, NULL) == 1 &&
+            EVP_EncryptInit_ex(context, NULL, NULL, aes_key, record->nonce) == 1 &&
+            EVP_EncryptUpdate(context, NULL, &output_bytes, aad, sizeof aad) == 1 &&
+            EVP_EncryptUpdate(context, record->ciphertext, &output_bytes,
+                              (const uint8_t *)&plain, sizeof plain) == 1 &&
+            EVP_EncryptFinal_ex(context, record->ciphertext + output_bytes,
+                                &final_bytes) == 1 &&
+            (size_t)(output_bytes + final_bytes) == sizeof plain &&
+            EVP_CIPHER_CTX_ctrl(context, EVP_CTRL_GCM_GET_TAG,
+                                sizeof record->tag, record->tag) == 1;
+    EVP_CIPHER_CTX_free(context);
+    clear_bytes(&plain, sizeof plain);
+    clear_bytes(aad, sizeof aad);
+    return valid;
+}
+
+static bool write_enrolment_uf2(const char *mount_path, const secure_record_t *record)
+{
+    const char *user = getenv("USER");
+    char default_mount[MOUNT_LINE_BYTES];
+    if (mount_path == NULL)
+    {
+        int mount_length = user == NULL ? -1 : snprintf(default_mount,
+                sizeof default_mount, "%s/%s/RP2350",
+                HID_LAB_BOOT_VOLUME_ROOT, user);
+        if (mount_length < 0 || (size_t)mount_length >= sizeof default_mount)
+            return false;
+        mount_path = default_mount;
+    }
+    char path[MOUNT_LINE_BYTES];
+    int path_length = snprintf(path, sizeof path, "%s/pico_hid_cfg.uf2", mount_path);
+    if (path_length < 0 || (size_t)path_length >= sizeof path)
+        return false;
+    enrolment_uf2_t block = {0};
+    block.magic0 = UF2_MAGIC0;
+    block.magic1 = UF2_MAGIC1;
+    block.flags = UF2_FAMILY_FLAG;
+    block.target = PAIRING_FLASH_ADDR;
+    block.payload_size = UF2_PAYLOAD_BYTES;
+    block.block_count = 1u;
+    block.family = UF2_RP2350_FAMILY;
+    block.magic_end = UF2_MAGIC_END;
+    memcpy(block.data, record, sizeof *record);
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (fd < 0 || fchmod(fd, 0600) != 0)
+    {
+        if (fd >= 0)
+            close(fd);
+        clear_bytes(&block, sizeof block);
+        return false;
+    }
+    bool written = write_full_at(fd, (const uint8_t *)&block, sizeof block);
+    bool closed = close(fd) == 0;
+    clear_bytes(&block, sizeof block);
+    return written && closed;
+}
+
+static int enrol_host(const char *private_path, const char *aes_path,
+                      const char *mount_path, bool clear_record)
+{
+    EVP_PKEY *host_key = NULL;
+    uint8_t aes_key[32] = {0};
+    secure_record_t record = {0};
+    bool valid = true;
+    if (!clear_record)
+    {
+        host_key = load_private_key(private_path);
+        valid = host_key != NULL && read_device_key(aes_path, aes_key) &&
+                make_pairing_record(host_key, aes_key, &record);
+    }
+    valid = valid && write_enrolment_uf2(mount_path, &record);
+    EVP_PKEY_free(host_key);
+    clear_bytes(aes_key, sizeof aes_key);
+    clear_bytes(&record, sizeof record);
+    if (!valid)
+    {
+        fprintf(stderr, "Pairing enrolment failed. Check the key files and BOOTSEL mount.\n");
+        return EXIT_FAILURE;
+    }
+    puts(clear_record ? "Pairing enrolment cleared" : "Pairing key written to BOOTSEL");
+    return EXIT_SUCCESS;
+}
+
 /* Direct reads bypass cached FAT data. A matching receipt identifies this proof. */
 static void log_verdict(int directory_fd, const uint8_t *nonce, const uint8_t *signature)
 {
@@ -273,12 +440,37 @@ static bool find_mount(const char *requested, EVP_PKEY *key)
 
 static int usage(const char *program)
 {
-    fprintf(stderr, "Usage: %s --key PRIVATE_KEY [--mount MOUNT_PATH]\n", program);
+    fprintf(stderr, "Usage: %s --key PRIVATE_KEY [--mount HIDPAIR_PATH]\n", program);
+    fprintf(stderr, "       %s --enrol --key PRIVATE_KEY --aes-key AES_KEY [--boot-mount RP2350_PATH]\n", program);
+    fprintf(stderr, "       %s --clear-enrolment [--boot-mount RP2350_PATH]\n", program);
     return 2;
 }
 
 int main(int argc, char **argv)
 {
+    if (argc > 1 && (strcmp(argv[1], "--enrol") == 0 ||
+                     strcmp(argv[1], "--clear-enrolment") == 0))
+    {
+        bool clear_record = strcmp(argv[1], "--clear-enrolment") == 0;
+        const char *key_path = NULL;
+        const char *aes_path = NULL;
+        const char *boot_mount = NULL;
+        for (int index = 2; index < argc; index++)
+        {
+            if (strcmp(argv[index], "--key") == 0 && index + 1 < argc)
+                key_path = argv[++index];
+            else if (strcmp(argv[index], "--aes-key") == 0 && index + 1 < argc)
+                aes_path = argv[++index];
+            else if (strcmp(argv[index], "--boot-mount") == 0 && index + 1 < argc)
+                boot_mount = argv[++index];
+            else
+                return usage(argv[0]);
+        }
+        if ((!clear_record && (key_path == NULL || aes_path == NULL)) ||
+            (clear_record && (key_path != NULL || aes_path != NULL)))
+            return usage(argv[0]);
+        return enrol_host(key_path, aes_path, boot_mount, clear_record);
+    }
     const char *key_path = NULL;
     const char *mount_path = NULL;
     for (int index = 1; index < argc; index++)

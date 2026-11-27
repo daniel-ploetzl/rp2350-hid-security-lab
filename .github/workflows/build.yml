@@ -53,7 +53,7 @@ jobs:
           /usr/bin/cmake --build build-${{ matrix.board }} -j"$(nproc)"
 
       - name: Build host tool
-        run: gcc -D_GNU_SOURCE -std=c11 -Wall -Wextra -Werror src/write_config.c -Iinc -lcrypto -o write_config
+        run: gcc -D_GNU_SOURCE -std=c11 -Wall -Wextra -Werror tools/write_config.c -Iinc -lcrypto -o write_config
 
       - name: Write checksum
         working-directory: build-${{ matrix.board }}

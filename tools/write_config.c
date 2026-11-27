@@ -20,11 +20,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
-#include <openssl/bio.h>
-#include <openssl/bn.h>
-#include <openssl/core_names.h>
 #include <openssl/evp.h>
-#include <openssl/pem.h>
 #include <openssl/rand.h>
 #include "flash_config.h"
 #include "hid_keymap.h"
@@ -37,6 +33,9 @@
 #define UF2_FAMILY_RP2350  0xE48BFF59UL
 #define UF2_PAYLOAD_SIZE   256
 #define UF2_DATA_SIZE      476
+#ifndef HID_LAB_BOOT_VOLUME_ROOT
+#define HID_LAB_BOOT_VOLUME_ROOT "/media"
+#endif
 
 typedef struct __attribute__((packed)) {
     uint32_t magic0;
@@ -51,9 +50,14 @@ typedef struct __attribute__((packed)) {
     uint32_t magic_end;
 } uf2_block_t;
 
+typedef struct {
+    uint32_t address;
+    const void *payload;
+    size_t length;
+} uf2_record_t;
+
 _Static_assert(sizeof(uf2_block_t) == 512, "UF2 blocks must be exactly 512 bytes");
 _Static_assert(sizeof(input_sequence_config_t) <= UF2_PAYLOAD_SIZE, "input sequence must fit one UF2 block");
-_Static_assert(sizeof(pairing_config_t) <= UF2_PAYLOAD_SIZE, "pairing record must fit one UF2 block");
 _Static_assert(sizeof(secure_record_t) == UF2_PAYLOAD_SIZE, "encrypted record must fill one UF2 payload");
 
 static void write_le32(void *dest, uint32_t v)
@@ -74,32 +78,34 @@ static void secure_clear(void *ptr, size_t len)
         *p++ = 0;
 }
 
-static void build_block(uf2_block_t *b, uint32_t addr, const void *payload, size_t len)
+static void build_block(uf2_block_t *b, const uf2_record_t *record,
+                        uint32_t number, uint32_t total)
 {
     memset(b, 0, sizeof(*b));
     b->magic0 = UF2_MAGIC_START0;
     b->magic1 = UF2_MAGIC_START1;
     b->flags  = UF2_FLAG_FAMILY_ID;
-    b->target_addr = addr;
+    b->target_addr = record->address;
     b->payload_size = UF2_PAYLOAD_SIZE;
-    b->block_no = 0;
-    b->total_blocks = 1;
+    b->block_no = number;
+    b->total_blocks = total;
     b->family_id = UF2_FAMILY_RP2350;
     b->magic_end = UF2_MAGIC_END;
-    memcpy(b->data, payload, len);
+    memcpy(b->data, record->payload, record->length);
 }
 
-static int write_uf2(uint32_t addr, const void *payload, size_t len)
+static int write_uf2(const uf2_record_t *records, size_t count)
 {
+    if (records == NULL || count == 0u || count > 2u)
+        return 1;
     const char *user = getenv("USER");
     if (!user)
         return (fprintf(stderr, "Error: USER environment variable not set\n"), 1);
 
-    uf2_block_t block;
-    build_block(&block, addr, payload, len);
-
+    uf2_block_t block = {0};
     char path[512];
-    snprintf(path, sizeof(path), "/media/%s/RP2350/pico_hid_cfg.uf2", user);
+    snprintf(path, sizeof(path), "%s/%s/RP2350/pico_hid_cfg.uf2",
+             HID_LAB_BOOT_VOLUME_ROOT, user);
 
     int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
     if (fd >= 0 && fchmod(fd, 0600) != 0)
@@ -119,18 +125,34 @@ static int write_uf2(uint32_t addr, const void *payload, size_t len)
         return (fprintf(stderr, "Failed to open %s: %s\n", path, strerror(saved_errno)), 1);
     }
 
-    if (fwrite(&block, 1, sizeof(block), f) != sizeof(block))
+    for (size_t index = 0u; index < count; index++)
     {
-        fprintf(stderr, "Write failed: %s\n", strerror(errno));
-        fclose(f);
-        secure_clear(&block, sizeof(block));
-        return 1;
+        build_block(&block, &records[index], (uint32_t)index, (uint32_t)count);
+        if (fwrite(&block, 1u, sizeof block, f) != sizeof block)
+        {
+            fprintf(stderr, "Write failed: %s\n", strerror(errno));
+            fclose(f);
+            secure_clear(&block, sizeof block);
+            return 1;
+        }
     }
 
-    fclose(f);
+    if (fclose(f) != 0)
+    {
+        int saved_errno = errno;
+        secure_clear(&block, sizeof(block));
+        return (fprintf(stderr, "Failed to finish writing %s: %s\n",
+                        path, strerror(saved_errno)), 1);
+    }
     printf("UF2 written to %s\n", path);
-    secure_clear(&block, sizeof(block));
+    secure_clear(&block, sizeof block);
     return 0;
+}
+
+static int write_single_uf2(uint32_t address, const void *payload, size_t length)
+{
+    const uf2_record_t record = { address, payload, length };
+    return write_uf2(&record, 1u);
 }
 
 /* Hidden standard input keeps stored sequence text out of shell history,
@@ -206,7 +228,9 @@ static int parse_period_s(const char *arg, uint32_t *out)
 /* The config sector holds both fields, so every write sets the run window and
  * the re-activation period together. period_arg may be NULL, which keeps the
  * one-week default. */
-static int write_run_config(const char *hours_arg, const char *period_arg)
+static int prepare_run_config(const char *hours_arg, const char *period_arg,
+                              uint8_t cfg[12], uint32_t *hours_out,
+                              uint32_t *period_out)
 {
     char *end = NULL;
     long hours = strtol(hours_arg, &end, 10);
@@ -220,15 +244,11 @@ static int write_run_config(const char *hours_arg, const char *period_arg)
         return (fprintf(stderr, "Error: period must be 1-%lu s, optional suffix s/m/h/d/w (got %s)\n",
                         (unsigned long)CONFIG_PERIOD_MAX_S, period_arg), 1);
 
-    uint8_t cfg[12];
     write_le32(cfg,     CONFIG_MAGIC);
     write_le32(cfg + 4, (uint32_t)hours);
     write_le32(cfg + 8, period_s);
-
-    if (write_uf2(CONFIG_FLASH_ADDR, cfg, sizeof(cfg)) != 0)
-        return 1;
-    printf("Configured run window %ld h, re-activation period %lu s\n",
-           hours, (unsigned long)period_s);
+    *hours_out = (uint32_t)hours;
+    *period_out = period_s;
     return 0;
 }
 
@@ -322,16 +342,15 @@ static int seal_record(uint32_t addr, const void *plain, size_t plain_len,
     return ok ? 0 : -1;
 }
 
-static int write_input_sequence(const char *key_path)
+static int prepare_input_sequence(const char *key_path, secure_record_t *sealed)
 {
     char line1[INPUT_SEQUENCE_LINE1_MAX + 3] = {0};
     char line2[INPUT_SEQUENCE_LINE2_MAX + 3] = {0};
     char action[INPUT_SEQUENCE_ACTION_MAX + 3] = {0};
     uint8_t key[32] = {0};
     input_sequence_config_t plain;
-    secure_record_t sealed;
     memset(&plain, 0, sizeof plain);
-    memset(&sealed, 0, sizeof sealed);
+    memset(sealed, 0, sizeof *sealed);
 
     int result = 1;
     if (read_hidden_line(line1, sizeof line1, "Input sequence line 1: ") != 0)
@@ -382,14 +401,11 @@ static int write_input_sequence(const char *key_path)
     memcpy(plain.action, action, action_len);
     write_le32(&plain.crc, creds_crc32(&plain, offsetof(input_sequence_config_t, crc)));
     if (seal_record(INPUT_SEQUENCE_FLASH_ADDR, &plain, sizeof plain,
-                    key, &sealed) != 0)
+                    key, sealed) != 0)
     {
         fprintf(stderr, "Error: could not encrypt input sequence record\n");
         goto done;
     }
-    if (write_uf2(INPUT_SEQUENCE_FLASH_ADDR, &sealed, sizeof sealed) != 0)
-        goto done;
-    puts("Stored encrypted input sequence");
     result = 0;
     goto done;
 
@@ -407,104 +423,54 @@ done:
     secure_clear(action, sizeof action);
     secure_clear(key, sizeof key);
     secure_clear(&plain, sizeof plain);
-    secure_clear(&sealed, sizeof sealed);
+    if (result != 0)
+        secure_clear(sealed, sizeof *sealed);
     return result;
 }
 
-static int read_host_public_key(const char *path, uint8_t public_key[PAIRING_PUBLIC_KEY_BYTES])
+static int write_configuration(const char *hours_arg, const char *period_arg,
+                               const char *sequence_key)
 {
-    BIO *input = BIO_new_file(path, "r");
-    if (input == NULL)
-    {
-        fprintf(stderr, "Error: cannot open host public key file\n");
-        return -1;
-    }
-    EVP_PKEY *key = PEM_read_bio_PUBKEY(input, NULL, NULL, NULL);
-    BIO_free(input);
-    if (key == NULL || EVP_PKEY_is_a(key, "EC") != 1)
-    {
-        EVP_PKEY_free(key);
-        fprintf(stderr, "Error: host key must be a PEM encoded P-256 public key\n");
-        return -1;
-    }
-
-    char group[80] = {0};
-    size_t group_length = 0;
-    int valid_group = EVP_PKEY_get_group_name(key, group, sizeof group,
-                                             &group_length) == 1 &&
-                      (strcmp(group, "prime256v1") == 0 ||
-                       strcmp(group, "secp256r1") == 0);
-    BIGNUM *x = NULL;
-    BIGNUM *y = NULL;
-    int valid_key = valid_group && EVP_PKEY_get_bits(key) == 256 &&
-                    EVP_PKEY_get_bn_param(key, OSSL_PKEY_PARAM_EC_PUB_X, &x) == 1 &&
-                    EVP_PKEY_get_bn_param(key, OSSL_PKEY_PARAM_EC_PUB_Y, &y) == 1;
-    if (valid_key)
-    {
-        public_key[0] = 0x04u;
-        valid_key = BN_bn2binpad(x, public_key + 1, 32) == 32 &&
-                    BN_bn2binpad(y, public_key + 33, 32) == 32;
-    }
-    BN_free(x);
-    BN_free(y);
-    EVP_PKEY_free(key);
-    secure_clear(group, sizeof group);
-    if (!valid_key)
-    {
-        secure_clear(public_key, PAIRING_PUBLIC_KEY_BYTES);
-        fprintf(stderr, "Error: host public key is not an uncompressed P-256 point\n");
-        return -1;
-    }
-    return 0;
-}
-
-static int write_host_pairing(const char *public_path, const char *key_path)
-{
-    uint8_t aes_key[32] = {0};
-    pairing_config_t plain;
-    secure_record_t sealed;
-    memset(&plain, 0, sizeof plain);
-    memset(&sealed, 0, sizeof sealed);
+    uint8_t config[12] = {0};
+    uint32_t hours = 0u;
+    uint32_t period = 0u;
+    secure_record_t sequence = {0};
+    uf2_record_t records[2];
+    size_t count = 0u;
     int result = 1;
 
-    if (read_host_public_key(public_path, plain.public_key) != 0 ||
-        read_device_key(key_path, aes_key) != 0)
-        goto done;
-    write_le32(&plain.magic, PAIRING_MAGIC);
-    write_le32(&plain.version, PAIRING_VERSION);
-    write_le32(&plain.crc, creds_crc32(&plain, offsetof(pairing_config_t, crc)));
-    if (seal_record(PAIRING_FLASH_ADDR, &plain, sizeof plain,
-                    aes_key, &sealed) != 0)
+    if (hours_arg != NULL)
     {
-        fprintf(stderr, "Error: could not encrypt host pairing record\n");
-        goto done;
+        if (prepare_run_config(hours_arg, period_arg, config, &hours, &period) != 0)
+            goto done;
+        records[count++] = (uf2_record_t){ CONFIG_FLASH_ADDR, config, sizeof config };
     }
-    if (write_uf2(PAIRING_FLASH_ADDR, &sealed, sizeof sealed) != 0)
+    if (sequence_key != NULL)
+    {
+        if (prepare_input_sequence(sequence_key, &sequence) != 0)
+            goto done;
+        records[count++] = (uf2_record_t){ INPUT_SEQUENCE_FLASH_ADDR, &sequence, sizeof sequence };
+    }
+    if (count == 0u || write_uf2(records, count) != 0)
         goto done;
-    puts("Stored encrypted host pairing key");
+    if (hours_arg != NULL)
+        printf("Configured run window %lu h, re-activation period %lu s\n",
+               (unsigned long)hours, (unsigned long)period);
+    if (sequence_key != NULL)
+        puts("Stored encrypted input sequence");
     result = 0;
 
 done:
-    secure_clear(aes_key, sizeof aes_key);
-    secure_clear(&plain, sizeof plain);
-    secure_clear(&sealed, sizeof sealed);
+    secure_clear(config, sizeof config);
+    secure_clear(&sequence, sizeof sequence);
     return result;
-}
-
-static int clear_host_pairing(void)
-{
-    const uint8_t blank[sizeof(secure_record_t)] = {0};
-    if (write_uf2(PAIRING_FLASH_ADDR, blank, sizeof blank) != 0)
-        return 1;
-    puts("Host pairing cleared");
-    return 0;
 }
 
 static int clear_input_sequence(void)
 {
     const uint8_t blank[sizeof(secure_record_t)] = {0};
 
-    if (write_uf2(INPUT_SEQUENCE_FLASH_ADDR, blank, sizeof(blank)) != 0)
+    if (write_single_uf2(INPUT_SEQUENCE_FLASH_ADDR, blank, sizeof(blank)) != 0)
         return 1;
     printf("Stored input sequence cleared\n");
     return 0;
@@ -514,19 +480,17 @@ int main(int ac, char **av)
 {
     if (ac == 2 && strcmp(av[1], "--sequence-clear") == 0)
         return clear_input_sequence();
-    if (ac == 2 && strcmp(av[1], "--pair-clear") == 0)
-        return clear_host_pairing();
     if (ac == 3 && strcmp(av[1], "--sequence") == 0)
-        return write_input_sequence(av[2]);
-    if (ac == 4 && strcmp(av[1], "--pair-host") == 0)
-        return write_host_pairing(av[2], av[3]);
+        return write_configuration(NULL, NULL, av[2]);
+    if (ac == 4 && av[1][0] != '-' && strcmp(av[2], "--sequence") == 0)
+        return write_configuration(av[1], NULL, av[3]);
+    if (ac == 5 && av[1][0] != '-' && strcmp(av[3], "--sequence") == 0)
+        return write_configuration(av[1], av[2], av[4]);
     if ((ac == 2 || ac == 3) && av[1][0] != '-')
-        return write_run_config(av[1], ac == 3 ? av[2] : NULL);
+        return write_configuration(av[1], ac == 3 ? av[2] : NULL, NULL);
 
-    fprintf(stderr, "Usage: %s <hours> [period]    period e.g. 3600, 30m, 1h, 1d, 7d. Default 7d\n", av[0]);
-    fprintf(stderr, "       %s --sequence <aes-key-file>      (three hidden input sequence lines)\n", av[0]);
+    fprintf(stderr, "Usage: %s <hours> [period] [--sequence <aes-key-file>]\n", av[0]);
+    fprintf(stderr, "       %s --sequence <aes-key-file>\n", av[0]);
     fprintf(stderr, "       %s --sequence-clear\n", av[0]);
-    fprintf(stderr, "       %s --pair-host <host-public.pem> <aes-key-file>\n", av[0]);
-    fprintf(stderr, "       %s --pair-clear\n", av[0]);
     return 1;
 }
